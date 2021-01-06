@@ -16,10 +16,10 @@ enum class NNActivationType {
 };
 
 struct DiagGaussianDistribution {
-    torch::Tensor mu;
-    torch::Tensor sigma;
+    torch::Tensor mean;
+    torch::Tensor logstd;
 
-    DiagGaussianDistribution(torch::Tensor mu, torch::Tensor sigma);
+    DiagGaussianDistribution(torch::Tensor mean, torch::Tensor logstd);
 
     torch::Tensor entropy();
 

@@ -16,25 +16,25 @@ torch::Tensor sum_independent_dims(torch::Tensor tensor) {
     return tensor;
 }
 
-DiagGaussianDistribution::DiagGaussianDistribution(torch::Tensor mu, torch::Tensor sigma) : mu(std::move(mu)), sigma(std::move(sigma)) {}
+DiagGaussianDistribution::DiagGaussianDistribution(torch::Tensor mean, torch::Tensor logstd) : mean(std::move(mean)), logstd(std::move(logstd)) {}
 
 torch::Tensor DiagGaussianDistribution::entropy() {
-    auto entropies = 0.5f + 0.5f * std::log(2 * M_PI) + torch::log(sigma);
+    auto entropies = 0.5f + 0.5f * std::log(2 * M_PI) + logstd;
     return sum_independent_dims(entropies);
 }
 
 torch::Tensor DiagGaussianDistribution::log_prob(torch::Tensor value) const {
-    auto log_probs = -(value - mu).pow(2) / (2 * sigma.pow(2)) - sigma.log() - std::log(std::sqrt(2*M_PI));
+    auto log_probs = -(value - mean).pow(2) / (2 * logstd.exp().pow(2)) - logstd - std::log(std::sqrt(2 * M_PI));
     return sum_independent_dims(log_probs);
 }
 
 torch::Tensor DiagGaussianDistribution::sample(c10::ArrayRef<int64_t> sample_shape) const {
     auto no_grad_guard = torch::NoGradGuard();
     if (sample_shape.empty()) {
-        return at::normal(mu, sigma);
+        return at::normal(mean, logstd);
     }
     else {
-        return at::normal(mu.expand(sample_shape), sigma.expand(sample_shape));
+        return at::normal(mean.expand(sample_shape), logstd.expand(sample_shape));
     }
 }
 
@@ -90,7 +90,7 @@ std::pair<DiagGaussianDistribution, torch::Tensor> Policy::forward(torch::Tensor
     auto hidden = actor_seq_nn->forward(state);
     auto action_mu = actor_mu_nn->forward(hidden);
     torch::Tensor value = critic_seq_nn->forward(state);
-    return {DiagGaussianDistribution{action_mu, actor_log_std.exp()}, value};
+    return {DiagGaussianDistribution{action_mu, actor_log_std}, value};
 }
 
 RolloutBuffer::RolloutBuffer(int state_size, int action_size, RolloutBufferOptions options)
@@ -303,7 +303,7 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
 
             auto [action_dist, values] = policy->forward(observations);
             values = values.flatten();
-            auto log_prob = action_dist.log_prob(values);
+            auto log_prob = action_dist.log_prob(observations);
             auto entropy = action_dist.entropy();
 
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8f);
@@ -340,11 +340,14 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
 
             auto loss = policy_loss + opt.ent_coef * entropy_loss + opt.vf_coef * value_loss;
 
+            approx_kl_divs.push_back(torch::mean(old_log_prob - log_prob).item<float>());
+            // std::cout << "old_log_prob = " << old_log_prob << std::endl;
+            // std::cout << "log_prob = " << log_prob << std::endl;
+
             optimizer->zero_grad();
             loss.backward();
             torch::nn::utils::clip_grad_norm_(policy->parameters(), opt.max_grad_norm);
             optimizer->step();
-            approx_kl_divs.push_back(torch::mean(old_log_prob - log_prob).item<float>());
         }
         float kl_div_mean = get_mean(approx_kl_divs);
         all_kl_divs.push_back(kl_div_mean);

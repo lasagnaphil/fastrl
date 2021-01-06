@@ -16,8 +16,8 @@ PYBIND11_MODULE(fastrl_py, m) {
 
     py::class_<DiagGaussianDistribution>(m, "NormalDistribution")
             .def(py::init<torch::Tensor, torch::Tensor>())
-            .def_readwrite("mu", &DiagGaussianDistribution::mu)
-            .def_readwrite("sigma", &DiagGaussianDistribution::sigma)
+            .def_readwrite("mu", &DiagGaussianDistribution::mean)
+            .def_readwrite("sigma", &DiagGaussianDistribution::logstd)
             .def("entropy", &DiagGaussianDistribution::entropy)
             .def("log_prob", &DiagGaussianDistribution::log_prob)
             .def("sample", &DiagGaussianDistribution::sample);

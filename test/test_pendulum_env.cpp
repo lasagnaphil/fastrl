@@ -10,7 +10,7 @@ int main(int argc, char** argv) {
     // google::SetStderrLogging(google::ERROR);
 
     auto device = torch::kCPU;
-    int num_envs = 1;
+    int num_envs = 8;
     bool eval_enabled = false;
 
     auto policy_opt = fastrl::PolicyOptions();
@@ -54,8 +54,8 @@ int main(int argc, char** argv) {
                 auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                 float value = value_tensor.item<float>();
                 float action = action_dist.sample().item<float>();
-                float log_prob = action_dist.log_prob(value_tensor).item<float>();
-                auto [new_obs, reward, new_done, info] = env[e].step(action);
+                float log_prob = action_dist.log_prob(obs_tensor).item<float>();
+                auto [new_obs, reward, new_done] = env[e].step(action);
                 rollout_buffer.add(e, obs.data(), &action, reward, done, value, log_prob);
                 obs = new_obs;
                 done = new_done;
@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
                 auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
                 auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                 float action = action_dist.sample().item<float>();
-                auto [new_obs, reward, new_done, info] = eval_env.step(action);
+                auto [new_obs, reward, new_done] = eval_env.step(action);
                 std::printf("State: [%f %f %f]\n", obs[0], obs[1], obs[2]);
                 std::printf("Reward: %f\n", reward);
                 episode_reward += reward;

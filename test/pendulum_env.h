@@ -33,7 +33,7 @@ struct PendulumEnv {
 
     float state[2];
     int time = 0;
-    int max_time = 100;
+    int max_time = 200;
 
     std::default_random_engine random_engine;
 
@@ -41,7 +41,7 @@ struct PendulumEnv {
         random_engine.seed(seed);
     }
 
-    std::tuple<std::array<float, 3>, float, bool, std::map<std::string, std::any>> step(float action) {
+    std::tuple<std::array<float, 3>, float, bool> step(float action) {
         auto [th, thdot] = state;
         float u = std::min(std::max(action, -max_torque), max_torque);
         float costs = SQUARE(angle_normalize(th)) + 0.1f * SQUARE(thdot) + 0.001f * SQUARE(u);
@@ -53,7 +53,7 @@ struct PendulumEnv {
         state[0] = newth;
         state[1] = newthdot;
         time++;
-        return {_get_obs(), -costs, time == 200, {}};
+        return {_get_obs(), -costs, time == max_time, };
     }
 
     std::array<float, 3> reset() {
