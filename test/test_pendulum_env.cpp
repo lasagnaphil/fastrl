@@ -47,6 +47,25 @@ int main(int argc, char** argv) {
         auto batches = rollout_buffer.get_samples(128);
 
         ppo.train(batches.data(), batches.size());
+        rollout_buffer.reset();
+
+        // Evaluation
+        int eval_trials = 300;
+        float avg_reward = 0.0f;
+        for (int i = 0; i < eval_trials; i++) {
+            torch::NoGradGuard guard {};
+            auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
+            auto [action_dist, value_tensor] = policy->forward(obs_tensor);
+            float value = value_tensor.item<float>();
+            float action = action_dist.sample().item<float>();
+            float log_prob = action_dist.log_prob(value_tensor).item<float>();
+            auto [new_obs, reward, new_done, info] = env.step(action);
+            avg_reward += reward;
+            obs = new_obs;
+            done = new_done;
+        }
+        avg_reward /= eval_trials;
+        std::printf("Average reward: %f\n", avg_reward);
     }
 
     return 0;

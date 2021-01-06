@@ -6,17 +6,29 @@
 
 namespace fastrl {
 
-NormalDistribution::NormalDistribution(torch::Tensor mu, torch::Tensor sigma) : mu(std::move(mu)), sigma(std::move(sigma)) {}
-
-torch::Tensor NormalDistribution::entropy() {
-    return 0.5f + 0.5f * std::log(2 * M_PI) + torch::log(sigma);
+torch::Tensor sum_independent_dims(torch::Tensor tensor) {
+    if (tensor.sizes().size() > 1) {
+        tensor = tensor.sum({1});
+    }
+    else {
+        tensor = tensor.sum();
+    }
+    return tensor;
 }
 
-torch::Tensor NormalDistribution::log_prob(torch::Tensor value) const {
-    return -(value - mu).pow(2) / (2 * sigma.pow(2)) - sigma.log() - std::log(std::sqrt(2*M_PI));
+DiagGaussianDistribution::DiagGaussianDistribution(torch::Tensor mu, torch::Tensor sigma) : mu(std::move(mu)), sigma(std::move(sigma)) {}
+
+torch::Tensor DiagGaussianDistribution::entropy() {
+    auto entropies = 0.5f + 0.5f * std::log(2 * M_PI) + torch::log(sigma);
+    return sum_independent_dims(entropies);
 }
 
-torch::Tensor NormalDistribution::sample(c10::ArrayRef<int64_t> sample_shape) const {
+torch::Tensor DiagGaussianDistribution::log_prob(torch::Tensor value) const {
+    auto log_probs = -(value - mu).pow(2) / (2 * sigma.pow(2)) - sigma.log() - std::log(std::sqrt(2*M_PI));
+    return sum_independent_dims(log_probs);
+}
+
+torch::Tensor DiagGaussianDistribution::sample(c10::ArrayRef<int64_t> sample_shape) const {
     auto no_grad_guard = torch::NoGradGuard();
     if (sample_shape.empty()) {
         return at::normal(mu, sigma);
@@ -31,51 +43,52 @@ Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
 
     namespace nn = torch::nn;
 
-    actor = nn::Sequential();
-    for (int i = 0; i < opt.actor_hidden_dim.size(); i++) {
-        if (i < opt.actor_hidden_dim.size() - 1) {
-            if (i == 0) {
-                actor->push_back(nn::Linear(state_size, opt.actor_hidden_dim[i]));
-            }
-            else {
-                actor->push_back(nn::Linear(opt.actor_hidden_dim[i], opt.actor_hidden_dim[i+1]));
-            }
-            switch (opt.activation_type) {
-                case NNActivationType::ReLU: actor->push_back(nn::ReLU()); break;
-                case NNActivationType::Tanh: actor->push_back(nn::Tanh()); break;
-            }
+    actor_seq_nn = nn::Sequential();
+    for (int i = 0; i < opt.actor_hidden_dim.size() - 1; i++) {
+        if (i == 0) {
+            actor_seq_nn->push_back(nn::Linear(state_size, opt.actor_hidden_dim[i]));
         }
         else {
-            actor->push_back(nn::Linear(opt.actor_hidden_dim[i], 2*action_size));
+            actor_seq_nn->push_back(nn::Linear(opt.actor_hidden_dim[i], opt.actor_hidden_dim[i + 1]));
+        }
+        switch (opt.activation_type) {
+            case NNActivationType::ReLU: actor_seq_nn->push_back(nn::ReLU()); break;
+            case NNActivationType::Tanh: actor_seq_nn->push_back(nn::Tanh()); break;
         }
     }
-    actor = register_module("actor", actor);
+    int last_hidden_dim = opt.actor_hidden_dim[opt.actor_hidden_dim.size()-1];
+    actor_mu_nn = torch::nn::Linear(last_hidden_dim, action_size);
+    actor_log_std = torch::ones({action_size}) * opt.log_std_init;
 
-    critic = nn::Sequential();
+    critic_seq_nn = nn::Sequential();
     for (int i = 0; i < opt.critic_hidden_dim.size(); i++) {
         if (i < opt.critic_hidden_dim.size() - 1) {
             if (i == 0) {
-                critic->push_back(nn::Linear(state_size, opt.critic_hidden_dim[i]));
+                critic_seq_nn->push_back(nn::Linear(state_size, opt.critic_hidden_dim[i]));
             }
             else {
-                critic->push_back(nn::Linear(opt.critic_hidden_dim[i], opt.critic_hidden_dim[i+1]));
+                critic_seq_nn->push_back(nn::Linear(opt.critic_hidden_dim[i], opt.critic_hidden_dim[i + 1]));
             }
             switch (opt.activation_type) {
-                case NNActivationType::ReLU: critic->push_back(nn::ReLU()); break;
-                case NNActivationType::Tanh: critic->push_back(nn::Tanh()); break;
+                case NNActivationType::ReLU: critic_seq_nn->push_back(nn::ReLU()); break;
+                case NNActivationType::Tanh: critic_seq_nn->push_back(nn::Tanh()); break;
             }
         }
         else {
-            critic->push_back(nn::Linear(opt.critic_hidden_dim[i], 1));
+            critic_seq_nn->push_back(nn::Linear(opt.critic_hidden_dim[i], 1));
         }
     }
-    critic = register_module("critic", critic);
+    actor_seq_nn = register_module("actor_seq_nn", actor_seq_nn);
+    actor_mu_nn = register_module("actor_mu_nn", actor_mu_nn);
+    actor_log_std = register_parameter("actor_std_param", actor_log_std);
+    critic_seq_nn = register_module("critic_seq_nn", critic_seq_nn);
 }
 
-std::pair<NormalDistribution, torch::Tensor> Policy::forward(torch::Tensor state) {
-    auto action_dist = actor->forward(state).chunk(2, -1);
-    torch::Tensor value = critic->forward(state);
-    return {NormalDistribution{action_dist[0], action_dist[1]}, value};
+std::pair<DiagGaussianDistribution, torch::Tensor> Policy::forward(torch::Tensor state) {
+    auto hidden = actor_seq_nn->forward(state);
+    auto action_mu = actor_mu_nn->forward(hidden);
+    torch::Tensor value = critic_seq_nn->forward(state);
+    return {DiagGaussianDistribution{action_mu, actor_log_std.exp()}, value};
 }
 
 RolloutBuffer::RolloutBuffer(int state_size, int action_size, RolloutBufferOptions options)
@@ -113,27 +126,24 @@ void RolloutBuffer::reset() {
     log_probs_data.zero_();
     advantages_data.zero_();
     pos = 0;
-    full = false;
 }
 
 void RolloutBuffer::compute_returns_and_advantage(const float* last_values, const bool* last_dones) {
-    std::vector<float> next_non_terminal(opt.buffer_size);
-    std::vector<float> next_values(opt.buffer_size);
-    std::vector<float> delta(opt.buffer_size);
-    std::vector<float> last_gae_lam(opt.buffer_size);
-
+    std::vector<float> last_gae_lam(opt.num_envs, 0.0f);
     for (int step = opt.buffer_size - 1; step >= 0; step--) {
         for (int k = 0; k < opt.num_envs; k++) {
+            float next_non_terminal, next_values;
             if (step == opt.buffer_size - 1) {
-                next_non_terminal[k] = 1.0 - (double)last_dones[k];
-                next_values[k] = last_values[k];
+                next_non_terminal = 1.0f - (float)last_dones[k];
+                next_values = last_values[k];
             }
             else {
-                next_non_terminal[k] = 1.0 - dones[step + 1][k];
-                next_values[k] = values[step + 1][k];
+                next_non_terminal = 1.0f - dones[step + 1][k];
+                next_values = values[step + 1][k];
             }
-            delta[k] = rewards[step][k] + opt.gamma * next_values[k] * next_non_terminal[k] - values[step][k];
-            last_gae_lam[k] = delta[k] + opt.gamma * opt.gae_lambda * next_non_terminal[k] * last_gae_lam[k];
+            float delta = rewards[step][k] + opt.gamma * next_values * next_non_terminal - values[step][k];
+            last_gae_lam[k] = delta + opt.gamma * opt.gae_lambda * next_non_terminal * last_gae_lam[k];
+            advantages[step][k] = last_gae_lam[k];
         }
     }
     for (int step = 0; step < opt.buffer_size; step++) {
@@ -145,6 +155,10 @@ void RolloutBuffer::compute_returns_and_advantage(const float* last_values, cons
 
 void RolloutBuffer::add(int env_id, const float* obs, const float* action, float reward, bool done, float value,
                                 float log_prob) {
+    if (pos == opt.buffer_size) {
+        std::cerr << "Error in get_samples(): RolloutBuffer is full!" << std::endl;
+        exit(EXIT_FAILURE);
+    }
     std::copy_n(obs, state_size, observations[pos][env_id].data());
     std::copy_n(action, action_size, actions[pos][env_id].data());
     rewards[pos][env_id] = reward;
@@ -152,15 +166,12 @@ void RolloutBuffer::add(int env_id, const float* obs, const float* action, float
     values[pos][env_id] = value;
     log_probs[pos][env_id] = log_prob;
     pos++;
-    if (pos == opt.buffer_size) {
-        full = true;
-    }
 }
 
 std::vector<RolloutBufferBatch> RolloutBuffer::get_samples(int batch_size) {
-    if (!full) {
+    if (pos != opt.buffer_size) {
         std::cerr << "Error in get_samples(): RolloutBuffer is not full yet!" << std::endl;
-        return {};
+        exit(EXIT_FAILURE);
     }
     std::vector<int64_t> indices(opt.buffer_size * opt.num_envs);
     for (int64_t i = 0; i < indices.size(); i++) indices[i] = i;

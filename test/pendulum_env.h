@@ -17,6 +17,9 @@ inline float angle_normalize(float x) {
 #define SQUARE(x) ((x)*(x))
 
 struct PendulumEnv {
+    constexpr static int obs_dim = 3;
+    constexpr static int act_dim = 1;
+
     PendulumEnv(float g = 10.0) : g(g) {
         seed();
     }

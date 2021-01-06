@@ -14,13 +14,13 @@ using namespace fastrl;
 PYBIND11_MODULE(fastrl_py, m) {
     m.doc() = "Python bindings for the FastRL library";
 
-    py::class_<NormalDistribution>(m, "NormalDistribution")
+    py::class_<DiagGaussianDistribution>(m, "NormalDistribution")
             .def(py::init<torch::Tensor, torch::Tensor>())
-            .def_readwrite("mu", &NormalDistribution::mu)
-            .def_readwrite("sigma", &NormalDistribution::sigma)
-            .def("entropy", &NormalDistribution::entropy)
-            .def("log_prob", &NormalDistribution::log_prob)
-            .def("sample", &NormalDistribution::sample);
+            .def_readwrite("mu", &DiagGaussianDistribution::mu)
+            .def_readwrite("sigma", &DiagGaussianDistribution::sigma)
+            .def("entropy", &DiagGaussianDistribution::entropy)
+            .def("log_prob", &DiagGaussianDistribution::log_prob)
+            .def("sample", &DiagGaussianDistribution::sample);
 
     py::enum_<NNActivationType>(m, "NNActivationType")
             .value("ReLU", NNActivationType::ReLU)

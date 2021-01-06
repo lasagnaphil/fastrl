@@ -15,11 +15,11 @@ enum class NNActivationType {
     ReLU, Tanh
 };
 
-struct NormalDistribution {
+struct DiagGaussianDistribution {
     torch::Tensor mu;
     torch::Tensor sigma;
 
-    NormalDistribution(torch::Tensor mu, torch::Tensor sigma);
+    DiagGaussianDistribution(torch::Tensor mu, torch::Tensor sigma);
 
     torch::Tensor entropy();
 
@@ -33,18 +33,21 @@ struct PolicyOptions {
     std::vector<int> actor_hidden_dim = {256, 256};
     std::vector<int> critic_hidden_dim = {256, 256};
     NNActivationType activation_type = NNActivationType::ReLU;
+    float log_std_init = 0.0f;
 };
 
 class Policy : public torch::nn::Module {
 public:
     Policy(int state_size, int action_size, const PolicyOptions& options);
 
-    std::pair<NormalDistribution, torch::Tensor> forward(torch::Tensor state);
+    std::pair<DiagGaussianDistribution, torch::Tensor> forward(torch::Tensor state);
 
     int state_size, action_size;
     PolicyOptions opt;
-    torch::nn::Sequential actor = nullptr;
-    torch::nn::Sequential critic = nullptr;
+    torch::nn::Sequential actor_seq_nn = nullptr;
+    torch::nn::Sequential critic_seq_nn = nullptr;
+    torch::nn::Linear actor_mu_nn = nullptr;
+    torch::Tensor actor_log_std;
 };
 
 struct RolloutBufferOptions {
@@ -84,7 +87,6 @@ public:
     torch::TensorAccessor<float, 3> observations, actions;
 
     int pos = 0;
-    bool full = false;
 };
 
 struct PPOOptions {
