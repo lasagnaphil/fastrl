@@ -32,6 +32,8 @@ struct PendulumEnv {
     float l = 1;
 
     float state[2];
+    int time = 0;
+    int max_time = 100;
 
     std::default_random_engine random_engine;
 
@@ -44,18 +46,20 @@ struct PendulumEnv {
         float u = std::min(std::max(action, -max_torque), max_torque);
         float costs = SQUARE(angle_normalize(th)) + 0.1f * SQUARE(thdot) + 0.001f * SQUARE(u);
 
-        float newthdot = thdot + (-3.0 * g / (2.0 * l) * std::sin(th + M_PI) + 3.0 / SQUARE(m * l) * u) * dt;
+        float newthdot = thdot + (-3.f * g / (2.f * l) * std::sin(th + M_PI) + 3.f / (m * SQUARE(l)) * u) * dt;
         float newth = th + newthdot * dt;
         newthdot = std::min(std::max(newthdot, -max_speed), max_speed);
 
         state[0] = newth;
         state[1] = newthdot;
-        return {_get_obs(), -costs, false, {}};
+        time++;
+        return {_get_obs(), -costs, time == 200, {}};
     }
 
     std::array<float, 3> reset() {
         state[0] = std::uniform_real_distribution<float>(-M_PI, M_PI)(random_engine);
         state[1] = std::uniform_real_distribution<float>(-1, 1)(random_engine);
+        time = 0;
         return _get_obs();
     }
 

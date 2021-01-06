@@ -6,66 +6,112 @@
 #include "fastrl/fastrl.h"
 
 int main(int argc, char** argv) {
-    auto policyOpt = fastrl::PolicyOptions();
-    auto rbOpt = fastrl::RolloutBufferOptions();
-    auto ppoOpt = fastrl::PPOOptions();
-
-    auto policy = std::make_shared<fastrl::Policy>(3, 1, policyOpt);
-    auto rollout_buffer = fastrl::RolloutBuffer(3, 1, rbOpt);
-    auto ppo = fastrl::PPO(ppoOpt, policy);
-
-    PendulumEnv env;
-    auto obs = env.reset();
-    auto done = false;
+    // google::InitGoogleLogging(argv[0]);
+    // google::SetStderrLogging(google::ERROR);
 
     auto device = torch::kCPU;
+    int num_envs = 1;
+    bool eval_enabled = false;
+
+    auto policy_opt = fastrl::PolicyOptions();
+    policy_opt.actor_hidden_dim = {64, 64};
+    policy_opt.critic_hidden_dim = {64, 64};
+    policy_opt.activation_type = fastrl::NNActivationType::Tanh;
+    policy_opt.device = device;
+
+    auto rb_opt = fastrl::RolloutBufferOptions();
+    rb_opt.gae_lambda = 0.95f;
+    rb_opt.gamma = 0.99f;
+    rb_opt.buffer_size = 2048;
+    rb_opt.num_envs = num_envs;
+
+    auto ppo_opt = fastrl::PPOOptions();
+    ppo_opt.learning_rate = 3e-4f;
+    ppo_opt.num_epochs = 10;
+    ppo_opt.ent_coef = 0.0f;
+    ppo_opt.device = device;
+
+    int sgd_minibatch_size = 64;
+
+    auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
+    auto rollout_buffer = fastrl::RolloutBuffer(3, 1, rb_opt);
+    auto ppo = fastrl::PPO(ppo_opt, policy);
+
+    std::vector<PendulumEnv> env(num_envs);
+    PendulumEnv eval_env;
 
     int max_steps = 1000;
     for (int step = 1; step <= max_steps; step++) {
-        for (int i = 0; i < rbOpt.buffer_size; i++) {
-            torch::NoGradGuard guard {};
-            auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
-            auto [action_dist, value_tensor] = policy->forward(obs_tensor);
-            float value = value_tensor.item<float>();
-            float action = action_dist.sample().item<float>();
-            float log_prob = action_dist.log_prob(value_tensor).item<float>();
-            auto [new_obs, reward, new_done, info] = env.step(action);
-            rollout_buffer.add(0, obs.data(), &action, reward, done, value, log_prob);
+        std::vector<float> last_values(num_envs);
+        std::vector<int8_t> last_dones(num_envs);
 
-            obs = new_obs;
-            done = new_done;
+        policy->eval();
+        for (int e = 0; e < num_envs; e++) {
+            auto obs = env[e].reset();
+            bool done;
+            for (int i = 0; i < rb_opt.buffer_size; i++) {
+                auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
+                auto [action_dist, value_tensor] = policy->forward(obs_tensor);
+                float value = value_tensor.item<float>();
+                float action = action_dist.sample().item<float>();
+                float log_prob = action_dist.log_prob(value_tensor).item<float>();
+                auto [new_obs, reward, new_done, info] = env[e].step(action);
+                rollout_buffer.add(e, obs.data(), &action, reward, done, value, log_prob);
+                obs = new_obs;
+                done = new_done;
+                if (done) {
+                    obs = env[e].reset();
+                }
+            }
+
+            {
+                torch::NoGradGuard guard {};
+                auto obs_tensor = torch::from_blob(obs.data(), obs.size()).to(device);
+                auto [_, value_tensor] = policy->forward(obs_tensor);
+                last_values[e] = value_tensor.item<float>();
+                last_dones[e] = (int8_t)done;
+            }
         }
 
-        {
-            torch::NoGradGuard guard {};
-            auto obs_tensor = torch::from_blob(obs.data(), obs.size()).to(device);
-            auto [_, value_tensor] = policy->forward(obs_tensor);
-            float value = value_tensor.item<float>();
-            rollout_buffer.compute_returns_and_advantage(&value, &done);
-        }
+        rollout_buffer.compute_returns_and_advantage(last_values.data(), last_dones.data());
+        std::printf("Average reward: %f\n", rollout_buffer.get_average_episode_reward());
 
-        auto batches = rollout_buffer.get_samples(128);
+        auto batches = rollout_buffer.get_samples(sgd_minibatch_size);
 
+        policy->train();
         ppo.train(batches.data(), batches.size());
         rollout_buffer.reset();
 
         // Evaluation
-        int eval_trials = 300;
-        float avg_reward = 0.0f;
-        for (int i = 0; i < eval_trials; i++) {
-            torch::NoGradGuard guard {};
-            auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
-            auto [action_dist, value_tensor] = policy->forward(obs_tensor);
-            float value = value_tensor.item<float>();
-            float action = action_dist.sample().item<float>();
-            float log_prob = action_dist.log_prob(value_tensor).item<float>();
-            auto [new_obs, reward, new_done, info] = env.step(action);
-            avg_reward += reward;
-            obs = new_obs;
-            done = new_done;
+        if (eval_enabled) {
+            policy->eval();
+            auto obs = eval_env.reset();
+            auto done = false;
+            int num_episodes = 0;
+            float avg_episode_reward = 0.0f;
+            float episode_reward = 0.0f;
+            for (int i = 0; i < eval_env.max_time; i++) {
+                torch::NoGradGuard guard {};
+                auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
+                auto [action_dist, value_tensor] = policy->forward(obs_tensor);
+                float action = action_dist.sample().item<float>();
+                auto [new_obs, reward, new_done, info] = eval_env.step(action);
+                std::printf("State: [%f %f %f]\n", obs[0], obs[1], obs[2]);
+                std::printf("Reward: %f\n", reward);
+                episode_reward += reward;
+                obs = new_obs;
+                done = new_done;
+                if (done || i == eval_env.max_time - 1) {
+                    num_episodes++;
+                    avg_episode_reward += episode_reward;
+                    episode_reward = 0.0f;
+                    eval_env.reset();
+                }
+            }
+            avg_episode_reward /= num_episodes;
+            std::printf("Average eval reward: %f\n", avg_episode_reward);
         }
-        avg_reward /= eval_trials;
-        std::printf("Average reward: %f\n", avg_reward);
+
     }
 
     return 0;

@@ -34,6 +34,7 @@ struct PolicyOptions {
     std::vector<int> critic_hidden_dim = {256, 256};
     NNActivationType activation_type = NNActivationType::ReLU;
     float log_std_init = 0.0f;
+    torch::Device device = torch::kCPU;
 };
 
 class Policy : public torch::nn::Module {
@@ -67,12 +68,14 @@ public:
 
     void reset();
 
-    void compute_returns_and_advantage(const float* last_values, const bool* last_dones);
+    void compute_returns_and_advantage(const float* last_values, const int8_t* last_dones);
 
     void add(int env_id, const float* obs, const float* action, float reward,
              bool done, float value, float log_prob);
 
     std::vector<RolloutBufferBatch> get_samples(int batch_size);
+
+    float get_average_episode_reward();
 
     static RolloutBuffer merge(const RolloutBuffer* rollout_buffers, int rollout_buffer_count);
 
@@ -83,10 +86,11 @@ public:
             returns_data, dones_data, values_data, log_probs_data;
 
     torch::TensorAccessor<float, 2> rewards, advantages,
-            returns, dones, values, log_probs;
+            returns, values, log_probs;
+    torch::TensorAccessor<int8_t, 2> dones;
     torch::TensorAccessor<float, 3> observations, actions;
 
-    int pos = 0;
+    std::vector<int> pos;
 };
 
 struct PPOOptions {
@@ -95,6 +99,7 @@ struct PPOOptions {
     float clip_range = 0.2f;
     bool clip_range_vf_enabled = false;
     float clip_range_vf = 0.0f;
+    bool entropy_enabled = true;
     float ent_coef = 0.0f;
     float vf_coef = 0.5f;
     float max_grad_norm = 0.5f;
