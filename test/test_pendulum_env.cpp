@@ -33,9 +33,10 @@ int main(int argc, char** argv) {
 
     int sgd_minibatch_size = 64;
 
+    auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
     auto rollout_buffer = fastrl::RolloutBuffer(3, 1, rb_opt);
-    auto ppo = fastrl::PPO(ppo_opt, policy);
+    auto ppo = fastrl::PPO(ppo_opt, policy, logger);
 
     std::vector<PendulumEnv> env(num_envs);
     PendulumEnv eval_env;
@@ -74,7 +75,9 @@ int main(int argc, char** argv) {
         }
 
         rollout_buffer.compute_returns_and_advantage(last_values.data(), last_dones.data());
-        std::printf("Average reward: %f\n", rollout_buffer.get_average_episode_reward());
+        float avg_episode_reward = rollout_buffer.get_average_episode_reward();
+        logger->add_scalar("train/avg_episode_reward", ppo.iter, avg_episode_reward);
+        std::printf("Average reward: %f\n", avg_episode_reward);
 
         auto batches = rollout_buffer.get_samples(sgd_minibatch_size);
 

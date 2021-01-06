@@ -272,8 +272,8 @@ RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
     return res;
 }
 
-PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy)
-        : opt(options), policy(policy) {
+PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger)
+        : opt(options), policy(policy), logger(logger) {
 
     optimizer = std::make_shared<torch::optim::Adam>(
             policy->parameters(), torch::optim::AdamOptions(opt.learning_rate));
@@ -287,8 +287,9 @@ float get_mean(const std::vector<float>& vec) {
 void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     // buffers for logging
     std::vector<float> entropy_losses, all_kl_divs, pg_losses, value_losses, clip_fractions;
+    float loss_value;
 
-    for (int epoch = 0; epoch < opt.num_epochs; epoch++) {
+    for (int sgd_iters = 0; sgd_iters < opt.num_epochs; sgd_iters++) {
         std::vector<float> approx_kl_divs;
 
         for (int batch_idx = 0; batch_idx < num_batches; batch_idx++) {
@@ -328,6 +329,8 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             }
             auto value_loss = torch::mse_loss(returns, values_pred);
             value_losses.push_back(value_loss.item<float>());
+            // std::cout << "returns = " << returns << std::endl;
+            // std::cout << "values_pred = " << values_pred << std::endl;
 
             torch::Tensor entropy_loss;
             if (opt.entropy_enabled) {
@@ -339,10 +342,9 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             entropy_losses.push_back(entropy_loss.item<float>());
 
             auto loss = policy_loss + opt.ent_coef * entropy_loss + opt.vf_coef * value_loss;
+            loss_value = loss.item<float>();
 
             approx_kl_divs.push_back(torch::mean(old_log_prob - log_prob).item<float>());
-            // std::cout << "old_log_prob = " << old_log_prob << std::endl;
-            // std::cout << "log_prob = " << log_prob << std::endl;
 
             optimizer->zero_grad();
             loss.backward();
@@ -353,13 +355,20 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
         all_kl_divs.push_back(kl_div_mean);
 
         if (opt.target_kl_enabled && kl_div_mean > 1.5f * opt.target_kl) {
-            printf("Early stopping at step %d due to reaching max kl: %.2f\n", epoch, kl_div_mean);
+            printf("Early stopping at step %d due to reaching max kl: %.2f\n", sgd_iters, kl_div_mean);
             break;
         }
     }
 
+    logger->add_scalar("train/entropy_loss", iter, get_mean(entropy_losses));
+    logger->add_scalar("train/policy_gradient_loss", iter, get_mean(pg_losses));
+    logger->add_scalar("train/value_loss", iter, get_mean(value_losses));
+    logger->add_scalar("train/approx_kl", iter, get_mean(all_kl_divs));
+    logger->add_scalar("train/clip_fraction", iter, get_mean(clip_fractions));
+    logger->add_scalar("train/loss", iter, loss_value);
 
-    // TODO: logging
+    iter++;
+
     // std::vector<float> entropy_losses, all_kl_divs, pg_losses, value_losses, clip_fractions;
     std::printf("Iter results: \n");
     std::printf("entropy_loss=%.6f, kl_div_mean=%.6f, pg_loss=%.6f, value_loss=%.6f, clip_fraction=%.6f\n",

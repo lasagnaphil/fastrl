@@ -1,4 +1,5 @@
 .idea/
 cmake-build-*/
 venv/
+logs/
 **.so

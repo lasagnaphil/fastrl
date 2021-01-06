@@ -7,7 +7,9 @@
 
 #include <vector>
 #include <random>
+
 #include <torch/torch.h>
+#include "tensorboard_logger.h"
 
 namespace fastrl {
 
@@ -111,7 +113,7 @@ struct PPOOptions {
 
 class PPO {
 public:
-    PPO(PPOOptions options, std::shared_ptr<Policy> policy);
+    PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger);
 
     void train(const RolloutBufferBatch* batches, int num_batches);
 
@@ -119,6 +121,9 @@ public:
 
     std::shared_ptr<Policy> policy;
     std::shared_ptr<torch::optim::Optimizer> optimizer;
+
+    std::shared_ptr<TensorBoardLogger> logger;
+    int iter = 0;
 };
 
 }
