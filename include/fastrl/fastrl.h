@@ -25,24 +25,23 @@ struct NormalDistribution {
 
     torch::Tensor log_prob(torch::Tensor value) const;
 
-    torch::Tensor sample(c10::ArrayRef<int64_t> sample_shape) const;
+    torch::Tensor sample(c10::ArrayRef<int64_t> sample_shape = {}) const;
 
 };
 
 struct PolicyOptions {
-    int state_size = 0;
-    int action_size = 0;
-    std::vector<int> actor_hidden_dim;
-    std::vector<int> critic_hidden_dim;
+    std::vector<int> actor_hidden_dim = {256, 256};
+    std::vector<int> critic_hidden_dim = {256, 256};
     NNActivationType activation_type = NNActivationType::ReLU;
 };
 
 class Policy : public torch::nn::Module {
 public:
-    Policy(const PolicyOptions& options);
+    Policy(int state_size, int action_size, const PolicyOptions& options);
 
     std::pair<NormalDistribution, torch::Tensor> forward(torch::Tensor state);
 
+    int state_size, action_size;
     PolicyOptions opt;
     torch::nn::Sequential actor = nullptr;
     torch::nn::Sequential critic = nullptr;
@@ -50,8 +49,6 @@ public:
 
 struct RolloutBufferOptions {
     int buffer_size = 2048;
-    int state_size = 0;
-    int action_size = 0;
     float gae_lambda = 1.0f;
     float gamma = 0.99f;
     int num_envs = 1;
@@ -63,16 +60,20 @@ struct RolloutBufferBatch {
 
 class RolloutBuffer {
 public:
-    RolloutBuffer(RolloutBufferOptions options);
+    RolloutBuffer(int state_size, int action_size, RolloutBufferOptions options);
 
-    void compute_returns_and_advantage(const float* last_values, const float* last_dones);
+    void reset();
+
+    void compute_returns_and_advantage(const float* last_values, const bool* last_dones);
 
     void add(int env_id, const float* obs, const float* action, float reward,
              bool done, float value, float log_prob);
 
     std::vector<RolloutBufferBatch> get_samples(int batch_size);
 
-private:
+    static RolloutBuffer merge(const RolloutBuffer* rollout_buffers, int rollout_buffer_count);
+
+    int state_size, action_size;
     RolloutBufferOptions opt;
 
     torch::Tensor observations_data, actions_data, rewards_data, advantages_data,
@@ -87,12 +88,8 @@ private:
 };
 
 struct PPOOptions {
-    int batch_size;
-    int num_epochs;
-
+    int num_epochs = 10;
     float learning_rate = 3e-4f;
-    float gamma = 0.99f;
-    float gae_lambda = 0.95f;
     float clip_range = 0.2f;
     bool clip_range_vf_enabled = false;
     float clip_range_vf = 0.0f;
@@ -102,19 +99,18 @@ struct PPOOptions {
     bool target_kl_enabled = false;
     float target_kl = 0.0f;
 
-    torch::Device device;
+    torch::Device device = torch::kCPU;
 };
 
 class PPO {
 public:
-    PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<RolloutBuffer> rollout_buffer);
+    PPO(PPOOptions options, std::shared_ptr<Policy> policy);
 
-    void train();
+    void train(const RolloutBufferBatch* batches, int num_batches);
 
     PPOOptions opt;
 
     std::shared_ptr<Policy> policy;
-    std::shared_ptr<RolloutBuffer> rollout_buffer;
     std::shared_ptr<torch::optim::Optimizer> optimizer;
 };
 

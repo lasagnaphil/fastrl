@@ -1,0 +1,5 @@
+find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
+message(STATUS "TORCH_PYTHON_LIBRARY: ${TORCH_PYTHON_LIBRARY}")
+pybind11_add_module(fastrl_py fastrl_py.cpp)
+set_target_properties(fastrl_py PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(fastrl_py PRIVATE fastrl ${TORCH_PYTHON_LIBRARY})

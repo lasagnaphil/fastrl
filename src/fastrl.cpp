@@ -18,17 +18,24 @@ torch::Tensor NormalDistribution::log_prob(torch::Tensor value) const {
 
 torch::Tensor NormalDistribution::sample(c10::ArrayRef<int64_t> sample_shape) const {
     auto no_grad_guard = torch::NoGradGuard();
-    return at::normal(mu.expand(sample_shape), sigma.expand(sample_shape));
+    if (sample_shape.empty()) {
+        return at::normal(mu, sigma);
+    }
+    else {
+        return at::normal(mu.expand(sample_shape), sigma.expand(sample_shape));
+    }
 }
 
-Policy::Policy(const PolicyOptions& options) : opt(options) {
+Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
+    : state_size(state_size), action_size(action_size), opt(options) {
+
     namespace nn = torch::nn;
 
-    actor = register_module("actor", nn::Sequential());
+    actor = nn::Sequential();
     for (int i = 0; i < opt.actor_hidden_dim.size(); i++) {
         if (i < opt.actor_hidden_dim.size() - 1) {
             if (i == 0) {
-                actor->push_back(nn::Linear(opt.state_size, opt.actor_hidden_dim[i]));
+                actor->push_back(nn::Linear(state_size, opt.actor_hidden_dim[i]));
             }
             else {
                 actor->push_back(nn::Linear(opt.actor_hidden_dim[i], opt.actor_hidden_dim[i+1]));
@@ -39,15 +46,16 @@ Policy::Policy(const PolicyOptions& options) : opt(options) {
             }
         }
         else {
-            actor->push_back(nn::Linear(opt.actor_hidden_dim[i], opt.action_size));
+            actor->push_back(nn::Linear(opt.actor_hidden_dim[i], 2*action_size));
         }
     }
+    actor = register_module("actor", actor);
 
-    critic = register_module("critic", nn::Sequential());
+    critic = nn::Sequential();
     for (int i = 0; i < opt.critic_hidden_dim.size(); i++) {
         if (i < opt.critic_hidden_dim.size() - 1) {
             if (i == 0) {
-                critic->push_back(nn::Linear(opt.state_size, opt.critic_hidden_dim[i]));
+                critic->push_back(nn::Linear(state_size, opt.critic_hidden_dim[i]));
             }
             else {
                 critic->push_back(nn::Linear(opt.critic_hidden_dim[i], opt.critic_hidden_dim[i+1]));
@@ -61,6 +69,7 @@ Policy::Policy(const PolicyOptions& options) : opt(options) {
             critic->push_back(nn::Linear(opt.critic_hidden_dim[i], 1));
         }
     }
+    critic = register_module("critic", critic);
 }
 
 std::pair<NormalDistribution, torch::Tensor> Policy::forward(torch::Tensor state) {
@@ -69,27 +78,45 @@ std::pair<NormalDistribution, torch::Tensor> Policy::forward(torch::Tensor state
     return {NormalDistribution{action_dist[0], action_dist[1]}, value};
 }
 
-RolloutBuffer::RolloutBuffer(RolloutBufferOptions options) : opt(options),
-                                                                             observations_data(torch::zeros({opt.buffer_size, opt.num_envs, opt.state_size})),
-                                                                             actions_data(torch::zeros({opt.buffer_size, opt.num_envs, opt.action_size})),
-                                                                             rewards_data(torch::zeros({opt.buffer_size, opt.num_envs})),
-                                                                             returns_data(torch::zeros({opt.buffer_size, opt.num_envs})),
-                                                                             dones_data(torch::zeros({opt.buffer_size, opt.num_envs})),
-                                                                             values_data(torch::zeros({opt.buffer_size, opt.num_envs})),
-                                                                             log_probs_data(torch::zeros({opt.buffer_size, opt.num_envs})),
-                                                                             advantages_data(torch::zeros({opt.buffer_size, opt.num_envs})),
-                                                                             observations(observations_data.accessor<float, 3>()),
-                                                                             actions(actions_data.accessor<float, 3>()),
-                                                                             rewards(rewards_data.accessor<float, 2>()),
-                                                                             returns(returns_data.accessor<float, 2>()),
-                                                                             dones(dones_data.accessor<float, 2>()),
-                                                                             values(values_data.accessor<float, 2>()),
-                                                                             log_probs(log_probs_data.accessor<float, 2>()),
-                                                                             advantages(advantages_data.accessor<float, 2>())
-{
+RolloutBuffer::RolloutBuffer(int state_size, int action_size, RolloutBufferOptions options)
+    : state_size(state_size), action_size(action_size), opt(options),
+      observations_data(torch::zeros(
+              {opt.buffer_size, opt.num_envs, state_size})),
+      actions_data(torch::zeros(
+              {opt.buffer_size, opt.num_envs, action_size})),
+      rewards_data(
+              torch::zeros({opt.buffer_size, opt.num_envs})),
+      returns_data(
+              torch::zeros({opt.buffer_size, opt.num_envs})),
+      dones_data(torch::zeros({opt.buffer_size, opt.num_envs})),
+      values_data(torch::zeros({opt.buffer_size, opt.num_envs})),
+      log_probs_data(
+              torch::zeros({opt.buffer_size, opt.num_envs})),
+      advantages_data(
+              torch::zeros({opt.buffer_size, opt.num_envs})),
+      observations(observations_data.accessor<float, 3>()),
+      actions(actions_data.accessor<float, 3>()),
+      rewards(rewards_data.accessor<float, 2>()),
+      returns(returns_data.accessor<float, 2>()),
+      dones(dones_data.accessor<float, 2>()),
+      values(values_data.accessor<float, 2>()),
+      log_probs(log_probs_data.accessor<float, 2>()),
+      advantages(advantages_data.accessor<float, 2>()) {}
+
+void RolloutBuffer::reset() {
+    observations_data.zero_();
+    actions_data.zero_();
+    rewards_data.zero_();
+    returns_data.zero_();
+    dones_data.zero_();
+    values_data.zero_();
+    log_probs_data.zero_();
+    advantages_data.zero_();
+    pos = 0;
+    full = false;
 }
 
-void RolloutBuffer::compute_returns_and_advantage(const float* last_values, const float* last_dones) {
+void RolloutBuffer::compute_returns_and_advantage(const float* last_values, const bool* last_dones) {
     std::vector<float> next_non_terminal(opt.buffer_size);
     std::vector<float> next_values(opt.buffer_size);
     std::vector<float> delta(opt.buffer_size);
@@ -98,7 +125,7 @@ void RolloutBuffer::compute_returns_and_advantage(const float* last_values, cons
     for (int step = opt.buffer_size - 1; step >= 0; step--) {
         for (int k = 0; k < opt.num_envs; k++) {
             if (step == opt.buffer_size - 1) {
-                next_non_terminal[k] = 1.0 - last_dones[k];
+                next_non_terminal[k] = 1.0 - (double)last_dones[k];
                 next_values[k] = last_values[k];
             }
             else {
@@ -118,8 +145,8 @@ void RolloutBuffer::compute_returns_and_advantage(const float* last_values, cons
 
 void RolloutBuffer::add(int env_id, const float* obs, const float* action, float reward, bool done, float value,
                                 float log_prob) {
-    std::copy_n(obs, opt.state_size, observations[pos][env_id].data());
-    std::copy_n(action, opt.action_size, actions[pos][env_id].data());
+    std::copy_n(obs, state_size, observations[pos][env_id].data());
+    std::copy_n(action, action_size, actions[pos][env_id].data());
     rewards[pos][env_id] = reward;
     dones[pos][env_id] = done;
     values[pos][env_id] = value;
@@ -143,21 +170,23 @@ std::vector<RolloutBufferBatch> RolloutBuffer::get_samples(int batch_size) {
     int start_idx = 0;
     while (start_idx < opt.buffer_size * opt.num_envs) {
         RolloutBufferBatch batch;
-        batch.observations = torch::empty({batch_size, opt.state_size});
-        batch.actions = torch::empty({batch_size, opt.action_size});
+        batch.observations = torch::empty({batch_size, state_size});
+        batch.actions = torch::empty({batch_size, action_size});
         batch.old_values = torch::empty({batch_size});
         batch.old_log_prob = torch::empty({batch_size});
         batch.advantages = torch::empty({batch_size});
         batch.returns = torch::empty({batch_size});
 
         auto batch_indices = c10::IntArrayRef(indices.data() + start_idx, batch_size);
-        for (int64_t i : batch_indices) {
-            std::copy_n(observations.data() + i*opt.state_size, opt.state_size, batch.observations.data_ptr<float>());
-            std::copy_n(actions.data() + i*opt.action_size, opt.action_size, batch.observations.data_ptr<float>());
-            batch.old_values.data()[i] = values.data()[i];
-            batch.old_log_prob.data()[i] = log_probs.data()[i];
-            batch.advantages.data()[i] = advantages.data()[i];
-            batch.returns.data()[i] = returns.data()[i];
+        for (int k = 0; k < batch_size; k++) {
+            int pos_idx = batch_indices[k] / opt.num_envs;
+            int env_idx = batch_indices[k] % opt.num_envs;
+            batch.observations[k] = observations_data[pos_idx][env_idx];
+            batch.actions[k] = actions_data[pos_idx][env_idx];
+            batch.old_values[k] = values_data[pos_idx][env_idx];
+            batch.old_log_prob[k] = log_probs_data[pos_idx][env_idx];
+            batch.advantages[k] = advantages_data[pos_idx][env_idx];
+            batch.returns[k] = returns_data[pos_idx][env_idx];
         }
         start_idx += batch_size;
         batches.push_back(batch);
@@ -165,22 +194,65 @@ std::vector<RolloutBufferBatch> RolloutBuffer::get_samples(int batch_size) {
     return batches;
 }
 
-PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<RolloutBuffer> rollout_buffer)
-        : opt(options), policy(std::move(policy)), rollout_buffer(std::move(rollout_buffer)) {
+RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
+
+    std::vector<torch::Tensor> observations(num_rbs), actions(num_rbs), rewards(num_rbs), advantages(num_rbs),
+                               returns(num_rbs), dones(num_rbs), values(num_rbs), log_probs(num_rbs);
+
+    int state_size = rbs[0].state_size;
+    int action_size = rbs[0].action_size;
+    RolloutBufferOptions opt = rbs->opt;
+    opt.num_envs = 0;
+
+    for (int i = 0; i < num_rbs; i++) {
+        const RolloutBuffer& rb = rbs[i];
+        assert(rb.state_size == state_size);
+        assert(rb.action_size == action_size);
+        assert(rb.opt.buffer_size == opt.buffer_size);
+        assert(rb.opt.gae_lambda == opt.gae_lambda);
+        assert(rb.opt.gamma == opt.gamma);
+        opt.num_envs += rb.opt.num_envs;
+
+        observations[i] = rb.observations_data;
+        actions[i] = rb.actions_data;
+        rewards[i] = rb.rewards_data;
+        advantages[i] = rb.advantages_data;
+        returns[i] = rb.returns_data;
+        dones[i] = rb.dones_data;
+        values[i] = rb.values_data;
+        log_probs[i] = rb.log_probs_data;
+    }
+
+    RolloutBuffer res(state_size, action_size, opt);
+
+    res.observations_data = torch::cat(observations, 1);
+    res.actions_data = torch::cat(actions, 1);
+    res.rewards_data = torch::cat(rewards, 1);
+    res.advantages_data = torch::cat(advantages, 1);
+    res.returns_data = torch::cat(returns, 1);
+    res.dones_data = torch::cat(dones, 1);
+    res.values_data = torch::cat(values, 1);
+    res.log_probs_data = torch::cat(log_probs, 1);
+    return res;
+}
+
+PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy)
+        : opt(options), policy(policy) {
 
     optimizer = std::make_shared<torch::optim::SGD>(
             policy->parameters(), torch::optim::SGDOptions(opt.learning_rate));
 }
 
-void PPO::train() {
+void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     // buffers for logging
     std::vector<float> entropy_losses, all_kl_divs, pg_losses, value_losses, clip_fractions;
 
-    std::vector<RolloutBufferBatch> batches = rollout_buffer->get_samples(opt.batch_size);
     for (int epoch = 0; epoch < opt.num_epochs; epoch++) {
         std::vector<float> approx_kl_divs;
 
-        for (auto& batch : batches) {
+        for (int batch_idx = 0; batch_idx < num_batches; batch_idx++) {
+            const RolloutBufferBatch& batch = batches[batch_idx];
+
             auto observations = batch.observations.to(opt.device);
             auto actions = batch.actions.to(opt.device);
             auto old_values = batch.old_values.to(opt.device);
