@@ -11,7 +11,7 @@
 #include <any>
 
 inline float angle_normalize(float x) {
-    return std::fmod(x + M_PI, 2*M_PI) - M_PI;
+    return std::fmod(x + (float)M_PI, 2*(float)M_PI) - (float)M_PI;
 }
 
 #define SQUARE(x) ((x)*(x))

@@ -36,6 +36,7 @@ struct PolicyOptions {
     std::vector<int> critic_hidden_dim = {256, 256};
     NNActivationType activation_type = NNActivationType::ReLU;
     float log_std_init = 0.0f;
+    bool fix_log_std = false;
     torch::Device device = torch::kCPU;
 };
 

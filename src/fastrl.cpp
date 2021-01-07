@@ -31,10 +31,10 @@ torch::Tensor DiagGaussianDistribution::log_prob(torch::Tensor value) const {
 torch::Tensor DiagGaussianDistribution::sample(c10::ArrayRef<int64_t> sample_shape) const {
     auto no_grad_guard = torch::NoGradGuard();
     if (sample_shape.empty()) {
-        return at::normal(mean, logstd);
+        return at::normal(mean, logstd.exp());
     }
     else {
-        return at::normal(mean.expand(sample_shape), logstd.expand(sample_shape));
+        return at::normal(mean.expand(sample_shape), logstd.exp().expand(sample_shape));
     }
 }
 
@@ -80,8 +80,11 @@ Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
     }
     actor_seq_nn = register_module("actor_seq_nn", actor_seq_nn);
     actor_mu_nn = register_module("actor_mu_nn", actor_mu_nn);
-    actor_log_std = register_parameter("actor_log_std", actor_log_std);
     critic_seq_nn = register_module("critic_seq_nn", critic_seq_nn);
+
+    if (!opt.fix_log_std) {
+        actor_log_std = register_parameter("actor_log_std", actor_log_std);
+    }
 
     this->to(opt.device);
 }
@@ -174,6 +177,8 @@ void RolloutBuffer::add(int env_id, const float* obs, const float* action, float
 }
 
 std::vector<RolloutBufferBatch> RolloutBuffer::get_samples(int batch_size) {
+    static std::default_random_engine random_engine;
+
     for (int e = 0; e < opt.num_envs; e++) {
         if (pos[e] != opt.buffer_size) {
             std::cerr << "Error in get_samples(): RolloutBuffer is not full yet!" << std::endl;
@@ -182,7 +187,7 @@ std::vector<RolloutBufferBatch> RolloutBuffer::get_samples(int batch_size) {
     }
     std::vector<int64_t> indices(opt.buffer_size * opt.num_envs);
     for (int64_t i = 0; i < indices.size(); i++) indices[i] = i;
-    std::shuffle(indices.begin(), indices.end(), std::default_random_engine{});
+    std::shuffle(indices.begin(), indices.end(), random_engine);
 
     std::vector<RolloutBufferBatch> batches;
     int start_idx = 0;

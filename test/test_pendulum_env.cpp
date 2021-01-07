@@ -2,8 +2,13 @@
 // Created by lasagnaphil on 21. 1. 3..
 //
 
+#define USE_RENDERER
+
 #include "pendulum_env.h"
 #include "fastrl/fastrl.h"
+#ifdef USE_RENDERER
+#include <raylib.h>
+#endif
 
 int main(int argc, char** argv) {
     // google::InitGoogleLogging(argv[0]);
@@ -11,11 +16,13 @@ int main(int argc, char** argv) {
 
     auto device = torch::kCPU;
     int num_envs = 8;
-    bool eval_enabled = false;
+    bool eval_enabled = true;
 
     auto policy_opt = fastrl::PolicyOptions();
     policy_opt.actor_hidden_dim = {64, 64};
     policy_opt.critic_hidden_dim = {64, 64};
+    policy_opt.log_std_init = 0.0f;
+    policy_opt.fix_log_std = false;
     policy_opt.activation_type = fastrl::NNActivationType::Tanh;
     policy_opt.device = device;
 
@@ -29,9 +36,10 @@ int main(int argc, char** argv) {
     ppo_opt.learning_rate = 3e-4f;
     ppo_opt.num_epochs = 10;
     ppo_opt.ent_coef = 0.0f;
+    ppo_opt.learning_rate = 1e-5;
     ppo_opt.device = device;
 
-    int sgd_minibatch_size = 64;
+    int sgd_minibatch_size = 512;
 
     auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
@@ -85,35 +93,66 @@ int main(int argc, char** argv) {
         ppo.train(batches.data(), batches.size());
         rollout_buffer.reset();
 
-        // Evaluation
-        if (eval_enabled) {
-            policy->eval();
-            auto obs = eval_env.reset();
-            auto done = false;
-            int num_episodes = 0;
-            float avg_episode_reward = 0.0f;
-            float episode_reward = 0.0f;
-            for (int i = 0; i < eval_env.max_time; i++) {
-                torch::NoGradGuard guard {};
-                auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
-                auto [action_dist, value_tensor] = policy->forward(obs_tensor);
-                float action = action_dist.sample().item<float>();
-                auto [new_obs, reward, new_done] = eval_env.step(action);
-                std::printf("State: [%f %f %f]\n", obs[0], obs[1], obs[2]);
-                std::printf("Reward: %f\n", reward);
-                episode_reward += reward;
-                obs = new_obs;
-                done = new_done;
-                if (done || i == eval_env.max_time - 1) {
-                    num_episodes++;
-                    avg_episode_reward += episode_reward;
-                    episode_reward = 0.0f;
-                    eval_env.reset();
+        if (step % 10 == 0) {
+            // Save model
+            torch::serialize::OutputArchive output_archive;
+            policy->save(output_archive);
+            output_archive.save_to(std::string("policy_") + std::to_string(step) + ".pt");
+
+            // Evaluation
+            if (eval_enabled) {
+
+#ifdef USE_RENDERER
+                InitWindow(800, 600, "PendulumV0");
+                SetTargetFPS(60);
+
+                policy->eval();
+                auto obs = eval_env.reset();
+                auto done = false;
+                int num_episodes = 0;
+                float avg_episode_reward = 0.0f;
+                float episode_reward = 0.0f;
+
+                while (!WindowShouldClose()) {
+                    torch::NoGradGuard guard {};
+                    auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
+                    auto [action_dist, value_tensor] = policy->forward(obs_tensor);
+                    float action = action_dist.sample().item<float>();
+                    auto [new_obs, reward, new_done] = eval_env.step(action);
+                    // auto [new_obs, reward, new_done] = eval_env.step(-1.f * (eval_env.state[0]) - 1.f * (eval_env.state[1]));
+                    // std::printf("State: [%f %f %f]\n", obs[0], obs[1], obs[2]);
+                    // std::printf("Reward: %f\n", reward);
+                    episode_reward += reward;
+                    obs = new_obs;
+                    done = new_done;
+                    if (done) {
+                        num_episodes++;
+                        avg_episode_reward += episode_reward;
+                        episode_reward = 0.0f;
+                        eval_env.reset();
+                    }
+                    BeginDrawing();
+                    ClearBackground(RAYWHITE);
+                    Rectangle pendulum_rect {390, 300, 20, 150};
+                    Vector2 pendulum_origin {10, 0};
+                    DrawRectanglePro(pendulum_rect, pendulum_origin, RAD2DEG * (eval_env.state[0] + M_PI), RED);
+                    DrawCircle(390, 300, 10, GRAY);
+                    DrawFPS(10, 10);
+                    DrawText(TextFormat("Reward: %f", reward), 10, 40, 20, DARKGRAY);
+                    DrawText(TextFormat("Action: %f", action), 10, 70, 20, DARKGRAY);
+                    EndDrawing();
+
+                    if (num_episodes == 1) break;
                 }
+
+                avg_episode_reward /= num_episodes;
+                std::printf("Average eval reward: %f\n", avg_episode_reward);
+
+                CloseWindow();
+#endif
             }
-            avg_episode_reward /= num_episodes;
-            std::printf("Average eval reward: %f\n", avg_episode_reward);
         }
+
 
     }
 
