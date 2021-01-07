@@ -53,7 +53,7 @@ struct PendulumEnv {
         state[0] = newth;
         state[1] = newthdot;
         time++;
-        return {_get_obs(), -costs, time == max_time, };
+        return {_get_obs(), -costs, time == max_time};
     }
 
     std::array<float, 3> reset() {

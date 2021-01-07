@@ -15,31 +15,30 @@ int main(int argc, char** argv) {
     // google::SetStderrLogging(google::ERROR);
 
     auto device = torch::kCPU;
-    int num_envs = 8;
+    int num_envs = 20;
     bool eval_enabled = true;
 
     auto policy_opt = fastrl::PolicyOptions();
-    policy_opt.actor_hidden_dim = {64, 64};
-    policy_opt.critic_hidden_dim = {64, 64};
-    policy_opt.log_std_init = 0.0f;
-    policy_opt.fix_log_std = false;
+    policy_opt.actor_hidden_dim = {256, 256};
+    policy_opt.critic_hidden_dim = {256, 256};
     policy_opt.activation_type = fastrl::NNActivationType::Tanh;
     policy_opt.device = device;
 
     auto rb_opt = fastrl::RolloutBufferOptions();
-    rb_opt.gae_lambda = 0.95f;
-    rb_opt.gamma = 0.99f;
-    rb_opt.buffer_size = 2048;
+    rb_opt.gae_lambda = 0.1f;
+    rb_opt.gamma = 0.95f;
+    rb_opt.buffer_size = 512;
     rb_opt.num_envs = num_envs;
 
     auto ppo_opt = fastrl::PPOOptions();
-    ppo_opt.learning_rate = 3e-4f;
-    ppo_opt.num_epochs = 10;
+    ppo_opt.learning_rate = 1e-5f;
+    ppo_opt.num_epochs = 6;
     ppo_opt.ent_coef = 0.0f;
-    ppo_opt.learning_rate = 1e-5;
+    ppo_opt.clip_range_vf_enabled = true;
+    ppo_opt.clip_range_vf = 100.0f;
     ppo_opt.device = device;
 
-    int sgd_minibatch_size = 512;
+    int sgd_minibatch_size = 64;
 
     auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
@@ -112,6 +111,7 @@ int main(int argc, char** argv) {
                 int num_episodes = 0;
                 float avg_episode_reward = 0.0f;
                 float episode_reward = 0.0f;
+                int time = 0;
 
                 while (!WindowShouldClose()) {
                     torch::NoGradGuard guard {};
@@ -142,7 +142,8 @@ int main(int argc, char** argv) {
                     DrawText(TextFormat("Action: %f", action), 10, 70, 20, DARKGRAY);
                     EndDrawing();
 
-                    if (num_episodes == 1) break;
+                    time++;
+                    if (time == eval_env.max_time) break;
                 }
 
                 avg_episode_reward /= num_episodes;

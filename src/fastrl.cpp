@@ -16,6 +16,60 @@ torch::Tensor sum_independent_dims(torch::Tensor tensor) {
     return tensor;
 }
 
+torch::Tensor orthogonal_(torch::Tensor tensor, double gain)
+{
+    torch::NoGradGuard guard;
+
+    AT_ASSERT(tensor.ndimension() >= 2, "Only tensors with 2 or more dimensions are supported");
+
+    const auto rows = tensor.size(0);
+    const auto columns = tensor.numel() / rows;
+    auto flattened = torch::randn({rows, columns});
+
+    if (rows < columns)
+    {
+        flattened.t_();
+    }
+
+    // Compute the qr factorization
+    torch::Tensor q, r;
+    std::tie(q, r) = torch::qr(flattened);
+    // Make Q uniform according to https://arxiv.org/pdf/math-ph/0609050.pdf
+    auto d = torch::diag(r, 0);
+    auto ph = d.sign();
+    q *= ph;
+
+    if (rows < columns)
+    {
+        q.t_();
+    }
+
+    tensor.view_as(q).copy_(q);
+    tensor.mul_(gain);
+
+    return tensor;
+}
+
+void init_weights(torch::OrderedDict<std::string, torch::Tensor> parameters,
+                  double weight_gain,
+                  double bias_gain)
+{
+    for (const auto &parameter : parameters)
+    {
+        if (parameter.value().size(0) != 0)
+        {
+            if (parameter.key().find("bias") != std::string::npos)
+            {
+                torch::nn::init::constant_(parameter.value(), bias_gain);
+            }
+            else if (parameter.key().find("weight") != std::string::npos)
+            {
+                orthogonal_(parameter.value(), weight_gain);
+            }
+        }
+    }
+}
+
 DiagGaussianDistribution::DiagGaussianDistribution(torch::Tensor mean, torch::Tensor logstd) : mean(std::move(mean)), logstd(std::move(logstd)) {}
 
 torch::Tensor DiagGaussianDistribution::entropy() {
@@ -87,6 +141,10 @@ Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
     }
 
     this->to(opt.device);
+
+    init_weights(actor_seq_nn->named_parameters(), std::sqrt(2.f), 0.f);
+    init_weights(actor_mu_nn->named_parameters(), std::sqrt(2.f), 0.f);
+    init_weights(critic_seq_nn->named_parameters(), std::sqrt(2.f), 0.f);
 }
 
 std::pair<DiagGaussianDistribution, torch::Tensor> Policy::forward(torch::Tensor state) {
@@ -325,14 +383,16 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
                     (torch::abs(ratio - 1.f) > opt.clip_range).toType(torch::kFloat32));
             clip_fractions.push_back(clip_fraction.item<float>());
 
-            torch::Tensor values_pred;
+            torch::Tensor value_loss;
             if (opt.clip_range_vf_enabled) {
-                values_pred = old_values + torch::clamp(values - old_values, -opt.clip_range_vf, opt.clip_range_vf);
+                auto values_clipped = old_values + torch::clamp(values - old_values, -opt.clip_range_vf, opt.clip_range_vf);
+                auto value_loss_1 = torch::square(values - returns);
+                auto value_loss_2 = torch::square(values_clipped - returns);
+                value_loss = torch::mean(torch::maximum(value_loss_1, value_loss_2));
             }
             else {
-                values_pred = values;
+                value_loss = torch::mean(torch::square(values - returns));
             }
-            auto value_loss = torch::mse_loss(returns, values_pred);
             value_losses.push_back(value_loss.item<float>());
             // std::cout << "returns = " << returns << std::endl;
             // std::cout << "values_pred = " << values_pred << std::endl;
