@@ -4,6 +4,9 @@
 
 #include "fastrl/fastrl.h"
 
+#include <c10d/ProcessGroupGloo.hpp>
+#include <c10d/ProcessGroupMPI.hpp>
+
 namespace fastrl {
 
 torch::Tensor sum_independent_dims(torch::Tensor tensor) {
@@ -340,8 +343,30 @@ PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<Ten
 
     optimizer = std::make_shared<torch::optim::Adam>(
             policy->parameters(), torch::optim::AdamOptions(opt.learning_rate));
-}
 
+    if (opt.use_distributed) {
+        dist_rank = atoi(getenv("RANK"));
+        dist_size = atoi(getenv("SIZE"));
+        file_store = std::dynamic_pointer_cast<c10d::Store, c10d::FileStore>(
+                std::make_shared<c10d::FileStore>("/tmp/fastrl", dist_size));
+        switch (opt.dist_backend) {
+            case DistributedBackend::Gloo:
+                process_group = std::dynamic_pointer_cast<c10d::ProcessGroup, c10d::ProcessGroupGloo>(
+                        std::make_shared<c10d::ProcessGroupGloo>(file_store, dist_rank, dist_size)); break;
+            // TODO: Add support for other distributed backends later
+            case DistributedBackend::MPI:
+                process_group = std::dynamic_pointer_cast<c10d::ProcessGroup, c10d::ProcessGroupMPI>(
+                        std::make_shared<c10d::ProcessGroupMPI>(file_store, dist_rank, dist_size)); break;
+                fprintf(stderr, "Torch MPI not supported!\n");
+                exit(EXIT_FAILURE);
+                break;
+            case DistributedBackend::NCCL:
+                // process_group = std::make_shared<c10d::ProcessGroupNCCL>(file_store, rank, size); break;
+                fprintf(stderr, "Torch NCCL not supported!\n");
+                exit(EXIT_FAILURE);
+        }
+    }
+}
 
 float get_mean(const std::vector<float>& vec) {
     return std::accumulate(vec.begin(), vec.end(), 0.f) / vec.size();
@@ -413,6 +438,21 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
 
             optimizer->zero_grad();
             loss.backward();
+
+            if (opt.use_distributed) {
+                auto params = policy->named_parameters();
+                std::vector<torch::Tensor> grads(policy->named_parameters().size());
+                std::transform(params.begin(), params.end(), grads.begin(), [](auto& item) {
+                    return item.value().grad().alias();
+                });
+
+                auto grad_allreduce_work = process_group->allreduce(grads);
+                grad_allreduce_work->wait();
+                for (auto& grad : grads) {
+                    grad.div_(dist_size);
+                }
+            }
+
             torch::nn::utils::clip_grad_norm_(policy->parameters(), opt.max_grad_norm);
             optimizer->step();
         }
@@ -438,7 +478,6 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     std::printf("Iter results: \n");
     std::printf("entropy_loss=%.6f, kl_div_mean=%.6f, pg_loss=%.6f, value_loss=%.6f, clip_fraction=%.6f\n",
                 get_mean(entropy_losses), get_mean(all_kl_divs), get_mean(pg_losses), get_mean(value_losses), get_mean(clip_fractions));
-
 }
 
 }

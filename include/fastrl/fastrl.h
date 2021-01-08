@@ -9,6 +9,8 @@
 #include <random>
 
 #include <torch/torch.h>
+#include <c10d/FileStore.hpp>
+#include <c10d/ProcessGroup.hpp>
 #include "tensorboard_logger.h"
 
 namespace fastrl {
@@ -96,6 +98,10 @@ public:
     std::vector<int> pos;
 };
 
+enum class DistributedBackend {
+    Gloo, MPI, NCCL
+};
+
 struct PPOOptions {
     int num_epochs = 10;
     float learning_rate = 3e-4f;
@@ -110,6 +116,9 @@ struct PPOOptions {
     float target_kl = 0.0f;
 
     torch::Device device = torch::kCPU;
+
+    bool use_distributed = false;
+    DistributedBackend dist_backend = DistributedBackend::Gloo;
 };
 
 class PPO {
@@ -125,6 +134,10 @@ public:
 
     std::shared_ptr<TensorBoardLogger> logger;
     int iter = 0;
+
+    std::shared_ptr<c10d::Store> file_store;
+    std::shared_ptr<c10d::ProcessGroup> process_group;
+    int dist_rank, dist_size;
 };
 
 }

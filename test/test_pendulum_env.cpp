@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
     ppo_opt.clip_range_vf_enabled = true;
     ppo_opt.clip_range_vf = 100.0f;
     ppo_opt.device = device;
+    ppo_opt.use_distributed = true;
 
     int sgd_minibatch_size = 64;
 
