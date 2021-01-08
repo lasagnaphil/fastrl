@@ -7,8 +7,7 @@
 
 #include <random>
 #include <tuple>
-#include <map>
-#include <any>
+#include <raylib.h>
 
 inline float angle_normalize(float x) {
     return std::fmod(x + (float)M_PI, 2*(float)M_PI) - (float)M_PI;
@@ -66,6 +65,13 @@ struct PendulumEnv {
     std::array<float, 3> _get_obs() {
         auto [theta, theta_dot] = state;
         return {std::cos(theta), std::sin(theta), theta_dot};
+    }
+
+    void render() {
+        Rectangle pendulum_rect {390, 300, 20, 150};
+        Vector2 pendulum_origin {10, 0};
+        DrawRectanglePro(pendulum_rect, pendulum_origin, RAD2DEG * (state[0] + M_PI), RED);
+        DrawCircle(390, 300, 10, GRAY);
     }
 };
 

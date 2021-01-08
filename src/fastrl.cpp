@@ -142,9 +142,11 @@ Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
 
     this->to(opt.device);
 
-    init_weights(actor_seq_nn->named_parameters(), std::sqrt(2.f), 0.f);
-    init_weights(actor_mu_nn->named_parameters(), std::sqrt(2.f), 0.f);
-    init_weights(critic_seq_nn->named_parameters(), std::sqrt(2.f), 0.f);
+    if (opt.ortho_init) {
+        init_weights(actor_seq_nn->named_parameters(), std::sqrt(2.f), 0.f);
+        init_weights(actor_mu_nn->named_parameters(), std::sqrt(2.f), 0.f);
+        init_weights(critic_seq_nn->named_parameters(), std::sqrt(2.f), 0.f);
+    }
 }
 
 std::pair<DiagGaussianDistribution, torch::Tensor> Policy::forward(torch::Tensor state) {

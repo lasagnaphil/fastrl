@@ -37,6 +37,7 @@ struct PolicyOptions {
     NNActivationType activation_type = NNActivationType::ReLU;
     float log_std_init = 0.0f;
     bool fix_log_std = false;
+    bool ortho_init = true;
     torch::Device device = torch::kCPU;
 };
 

@@ -4,11 +4,8 @@
 
 #define USE_RENDERER
 
-#include "pendulum_env.h"
+#include "mountaincar_env.h"
 #include "fastrl/fastrl.h"
-#ifdef USE_RENDERER
-#include <raylib.h>
-#endif
 
 int main(int argc, char** argv) {
     // google::InitGoogleLogging(argv[0]);
@@ -16,37 +13,39 @@ int main(int argc, char** argv) {
 
     auto device = torch::kCPU;
     int num_envs = 20;
-    bool eval_enabled = true;
+    bool eval_enabled = false;
 
     auto policy_opt = fastrl::PolicyOptions();
     policy_opt.actor_hidden_dim = {256, 256};
     policy_opt.critic_hidden_dim = {256, 256};
     policy_opt.activation_type = fastrl::NNActivationType::Tanh;
+    policy_opt.log_std_init = -3.29f;
+    // policy_opt.use_sde = true     TODO: Implement SDE
+    policy_opt.ortho_init = false;
     policy_opt.device = device;
 
     auto rb_opt = fastrl::RolloutBufferOptions();
-    rb_opt.gae_lambda = 0.99f;
-    rb_opt.gamma = 0.95f;
+    rb_opt.gae_lambda = 0.9f;
+    rb_opt.gamma = 0.9999f;
     rb_opt.buffer_size = 400;
     rb_opt.num_envs = num_envs;
 
     auto ppo_opt = fastrl::PPOOptions();
-    ppo_opt.learning_rate = 1e-5f;
-    ppo_opt.num_epochs = 6;
-    ppo_opt.ent_coef = 0.0f;
-    ppo_opt.clip_range_vf_enabled = true;
-    ppo_opt.clip_range_vf = 100.0f;
+    ppo_opt.learning_rate = 7.77e-5f;
+    ppo_opt.num_epochs = 10;
+    ppo_opt.ent_coef = 0.00429f;
+    ppo_opt.clip_range_vf_enabled = false;
     ppo_opt.device = device;
 
     int sgd_minibatch_size = 64;
 
     auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
-    auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
-    auto rollout_buffer = fastrl::RolloutBuffer(3, 1, rb_opt);
+    auto policy = std::make_shared<fastrl::Policy>(MountainCarEnv::obs_dim, MountainCarEnv::act_dim, policy_opt);
+    auto rollout_buffer = fastrl::RolloutBuffer(MountainCarEnv::obs_dim, MountainCarEnv::act_dim, rb_opt);
     auto ppo = fastrl::PPO(ppo_opt, policy, logger);
 
-    std::vector<PendulumEnv> env(num_envs);
-    PendulumEnv eval_env;
+    std::vector<MountainCarEnv> env(num_envs);
+    MountainCarEnv eval_env;
 
     int max_steps = 1000;
     for (int step = 1; step <= max_steps; step++) {
@@ -97,58 +96,6 @@ int main(int argc, char** argv) {
             torch::serialize::OutputArchive output_archive;
             policy->save(output_archive);
             output_archive.save_to(std::string("policy_") + std::to_string(step) + ".pt");
-
-            // Evaluation
-            if (eval_enabled) {
-
-#ifdef USE_RENDERER
-                InitWindow(800, 600, "PendulumV0");
-                SetTargetFPS(60);
-
-                policy->eval();
-                auto obs = eval_env.reset();
-                auto done = false;
-                int num_episodes = 0;
-                float avg_episode_reward = 0.0f;
-                float episode_reward = 0.0f;
-                int time = 0;
-
-                while (!WindowShouldClose()) {
-                    torch::NoGradGuard guard {};
-                    auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
-                    auto [action_dist, value_tensor] = policy->forward(obs_tensor);
-                    float action = action_dist.sample().item<float>();
-                    auto [new_obs, reward, new_done] = eval_env.step(action);
-                    // auto [new_obs, reward, new_done] = eval_env.step(-1.f * (eval_env.state[0]) - 1.f * (eval_env.state[1]));
-                    // std::printf("State: [%f %f %f]\n", obs[0], obs[1], obs[2]);
-                    // std::printf("Reward: %f\n", reward);
-                    episode_reward += reward;
-                    obs = new_obs;
-                    done = new_done;
-                    if (done) {
-                        num_episodes++;
-                        avg_episode_reward += episode_reward;
-                        episode_reward = 0.0f;
-                        eval_env.reset();
-                    }
-
-                    BeginDrawing();
-                    ClearBackground(RAYWHITE);
-                    eval_env.render();
-                    DrawFPS(10, 10);
-                    DrawText(TextFormat("Reward: %f", reward), 10, 40, 20, DARKGRAY);
-                    DrawText(TextFormat("Action: %f", action), 10, 70, 20, DARKGRAY);
-                    EndDrawing();
-                    time++;
-                    if (time == eval_env.max_time) break;
-                }
-
-                avg_episode_reward /= num_episodes;
-                std::printf("Average eval reward: %f\n", avg_episode_reward);
-
-                CloseWindow();
-#endif
-            }
         }
     }
 
