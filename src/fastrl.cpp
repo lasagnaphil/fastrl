@@ -4,7 +4,6 @@
 
 #include "fastrl/fastrl.h"
 
-#include <c10d/ProcessGroupGloo.hpp>
 #include <c10d/ProcessGroupMPI.hpp>
 
 namespace fastrl {
@@ -339,33 +338,25 @@ RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
 }
 
 PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger)
-        : opt(options), policy(policy), logger(logger) {
+        : opt(options), policy(std::move(policy)), logger(std::move(logger)) {
 
     optimizer = std::make_shared<torch::optim::Adam>(
             policy->parameters(), torch::optim::AdamOptions(opt.learning_rate));
 
-    if (opt.use_distributed) {
-        dist_rank = atoi(getenv("RANK"));
-        dist_size = atoi(getenv("SIZE"));
-        file_store = std::dynamic_pointer_cast<c10d::Store, c10d::FileStore>(
-                std::make_shared<c10d::FileStore>("/tmp/fastrl", dist_size));
-        switch (opt.dist_backend) {
-            case DistributedBackend::Gloo:
-                process_group = std::dynamic_pointer_cast<c10d::ProcessGroup, c10d::ProcessGroupGloo>(
-                        std::make_shared<c10d::ProcessGroupGloo>(file_store, dist_rank, dist_size)); break;
-            // TODO: Add support for other distributed backends later
-            case DistributedBackend::MPI:
-                process_group = std::dynamic_pointer_cast<c10d::ProcessGroup, c10d::ProcessGroupMPI>(
-                        std::make_shared<c10d::ProcessGroupMPI>(file_store, dist_rank, dist_size)); break;
-                fprintf(stderr, "Torch MPI not supported!\n");
-                exit(EXIT_FAILURE);
-                break;
-            case DistributedBackend::NCCL:
-                // process_group = std::make_shared<c10d::ProcessGroupNCCL>(file_store, rank, size); break;
-                fprintf(stderr, "Torch NCCL not supported!\n");
-                exit(EXIT_FAILURE);
-        }
-    }
+    dist_backend = DistributedBackend::MPI;
+    process_group = c10d::ProcessGroupMPI::createProcessGroupMPI();
+    dist_rank = process_group->getRank();
+    dist_size = process_group->getSize();
+}
+
+PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
+         std::shared_ptr<c10d::ProcessGroupMPI> process_group) : PPO(options, std::move(policy), std::move(logger)) {
+
+    dist_backend = DistributedBackend::MPI;
+    this->process_group = std::dynamic_pointer_cast<c10d::ProcessGroup, c10d::ProcessGroupMPI>(process_group);
+
+    dist_rank = process_group->getRank();
+    dist_size = process_group->getSize();
 }
 
 float get_mean(const std::vector<float>& vec) {
@@ -439,7 +430,7 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             optimizer->zero_grad();
             loss.backward();
 
-            if (opt.use_distributed) {
+            if (dist_backend != DistributedBackend::None) {
                 auto params = policy->named_parameters();
                 std::vector<torch::Tensor> grads(policy->named_parameters().size());
                 std::transform(params.begin(), params.end(), grads.begin(), [](auto& item) {

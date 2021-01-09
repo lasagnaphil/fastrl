@@ -4,8 +4,10 @@ project(fastrl)
 set(CMAKE_CXX_STANDARD 17)
 
 find_package(Torch REQUIRED)
-find_package(pybind11 REQUIRED)
 find_package(MPI REQUIRED)
+if (FASTRL_PYTHON)
+    find_package(pybind11 REQUIRED)
+endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
@@ -21,6 +23,10 @@ if (MPI_LINK_FLAGS)
     set_target_properties(fastrl PROPERTIES LINK_FLAGS ${MPI_LINK_FLAGS})
 endif()
 
+if (TARGET c10d)
+    MESSAGE("c10d Found!")
+endif()
+
 set(FASTRL_LIBS ${TORCH_LIBRARIES} MPI::MPI_C)
 
 add_subdirectory(deps/tensorboard_logger)
@@ -29,4 +35,7 @@ set(FASTRL_LIBS tensorboard_logger ${FASTRL_LIBS})
 target_link_libraries(fastrl PUBLIC ${FASTRL_LIBS})
 
 add_subdirectory(test)
-add_subdirectory(python)
+
+if (FASTRL_PYTHON)
+    add_subdirectory(python)
+endif()

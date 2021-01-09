@@ -11,7 +11,9 @@
 #include <torch/torch.h>
 #include <c10d/FileStore.hpp>
 #include <c10d/ProcessGroup.hpp>
+#include <c10d/ProcessGroupMPI.hpp>
 #include "tensorboard_logger.h"
+#include <mpi.h>
 
 namespace fastrl {
 
@@ -99,7 +101,7 @@ public:
 };
 
 enum class DistributedBackend {
-    Gloo, MPI, NCCL
+    None, Gloo, MPI, NCCL
 };
 
 struct PPOOptions {
@@ -116,14 +118,13 @@ struct PPOOptions {
     float target_kl = 0.0f;
 
     torch::Device device = torch::kCPU;
-
-    bool use_distributed = false;
-    DistributedBackend dist_backend = DistributedBackend::Gloo;
 };
 
 class PPO {
 public:
     PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger);
+    PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
+        std::shared_ptr<c10d::ProcessGroupMPI> process_group);
 
     void train(const RolloutBufferBatch* batches, int num_batches);
 
@@ -137,7 +138,9 @@ public:
 
     std::shared_ptr<c10d::Store> file_store;
     std::shared_ptr<c10d::ProcessGroup> process_group;
+    DistributedBackend dist_backend = DistributedBackend::None;
     int dist_rank, dist_size;
+    MPI_Comm comm;
 };
 
 }
