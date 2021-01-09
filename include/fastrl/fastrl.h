@@ -81,6 +81,41 @@ public:
     torch::Tensor actor_log_std;
 };
 
+struct RunningMeanStd {
+    torch::Tensor mean;
+    torch::Tensor var;
+    int state_size;
+    int64_t count = 0;
+    float clip_value;
+    float epsilon;
+
+    RunningMeanStd(int state_size, float clip_value = 10.0f, float epsilon = 1e-8f)
+            : state_size(state_size), clip_value(clip_value), epsilon(epsilon) {
+        mean = torch::zeros({state_size});
+        var = torch::ones({state_size});
+    }
+
+    void update(torch::Tensor arr) {
+        auto batch_mean = torch::mean(arr, {0});
+        auto batch_var = torch::var(arr, 0);
+        int64_t batch_count = arr.size(0);
+        update_from_moments(batch_mean, batch_var, batch_count);
+    }
+
+    void update_from_moments(torch::Tensor batch_mean, torch::Tensor batch_var, int64_t batch_count) {
+        auto delta = batch_mean - mean;
+        int64_t tot_count = count + batch_count;
+
+        mean = mean + delta * batch_count / tot_count;
+        var = (var * count + batch_var * batch_count + delta.square() * count * batch_count / tot_count) / tot_count;
+        count = tot_count;
+    }
+
+    torch::Tensor apply(torch::Tensor value) {
+        return torch::clip((value - mean) / (var.sqrt() + epsilon), -clip_value, clip_value);
+    }
+};
+
 struct RolloutBufferOptions {
     int buffer_size = 2048;
     float gae_lambda = 1.0f;
@@ -108,6 +143,8 @@ public:
     float get_average_episode_reward();
 
     static RolloutBuffer merge(const RolloutBuffer* rollout_buffers, int rollout_buffer_count);
+    void normalize_observations(RunningMeanStd& obs_mstd);
+    void normalize_rewards(RunningMeanStd& rew_mstd);
 
     int state_size, action_size;
     RolloutBufferOptions opt;
@@ -157,33 +194,6 @@ public:
 
     int64_t iter = 0;
     int64_t num_timesteps = 0;
-};
-
-struct RunningMeanStd {
-    torch::Tensor mean;
-    torch::Tensor var;
-    int state_size;
-    int64_t count = 0;
-
-    RunningMeanStd(int state_size) : state_size(state_size) {
-        mean = torch::zeros({state_size});
-        var = torch::zeros({state_size});
-    }
-
-    void update(torch::Tensor arr) {
-        auto batch_mean = torch::mean(arr, {0});
-        auto batch_var = torch::var(arr, {0});
-        int64_t batch_count = arr.size(0);
-    }
-
-    void update_from_moments(torch::Tensor batch_mean, torch::Tensor batch_var, int64_t batch_count) {
-        auto delta = batch_mean - mean;
-        int64_t tot_count = count + batch_count;
-
-        mean = mean + delta * batch_count / tot_count;
-        var = (var * count + batch_var * batch_count + delta.square() * count * batch_count / tot_count) / tot_count;
-        count = tot_count;
-    }
 };
 
 }

@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
     // google::SetStderrLogging(google::ERROR);
 
     auto device = torch::kCPU;
-    int num_envs = 20;
+    int num_envs = 16;
     bool eval_enabled = true;
 
     auto policy_opt = fastrl::PolicyOptions();
@@ -26,14 +26,14 @@ int main(int argc, char** argv) {
     policy_opt.device = device;
 
     auto rb_opt = fastrl::RolloutBufferOptions();
-    rb_opt.gae_lambda = 0.99f;
+    rb_opt.gae_lambda = 0.1f;
     rb_opt.gamma = 0.95f;
-    rb_opt.buffer_size = 400;
+    rb_opt.buffer_size = 200;
     rb_opt.num_envs = num_envs;
 
     auto ppo_opt = fastrl::PPOOptions();
-    ppo_opt.learning_rate = 1e-5f;
-    ppo_opt.num_epochs = 6;
+    ppo_opt.learning_rate = 1e-3f;
+    ppo_opt.num_epochs = 10;
     ppo_opt.ent_coef = 0.0f;
     ppo_opt.clip_range_vf_enabled = true;
     ppo_opt.clip_range_vf = 100.0f;
@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
     auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
     auto rollout_buffer = fastrl::RolloutBuffer(3, 1, rb_opt);
+    // auto obs_mstd = fastrl::RunningMeanStd(PendulumEnv::obs_dim);
     auto ppo = fastrl::PPO(ppo_opt, policy, logger);
 
     std::vector<PendulumEnv> env(num_envs);
@@ -60,6 +61,7 @@ int main(int argc, char** argv) {
             bool done;
             for (int i = 0; i < rb_opt.buffer_size; i++) {
                 auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
+                // obs_tensor = obs_mstd.apply(obs_tensor);
                 auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                 float value = value_tensor.item<float>();
                 float action = action_dist->sample().item<float>();
@@ -82,6 +84,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        // rollout_buffer.normalize_observations(obs_mstd);
         rollout_buffer.compute_returns_and_advantage(last_values.data(), last_dones.data());
         float avg_episode_reward = rollout_buffer.get_average_episode_reward();
         logger->add_scalar("train/avg_episode_reward", ppo.iter, avg_episode_reward);
@@ -117,6 +120,7 @@ int main(int argc, char** argv) {
                 while (!WindowShouldClose()) {
                     torch::NoGradGuard guard {};
                     auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
+                    // obs_tensor = obs_mstd.apply(obs_tensor);
                     auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                     float action = action_dist->sample().item<float>();
                     auto [new_obs, reward, new_done] = eval_env.step(action);

@@ -357,6 +357,19 @@ RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
     return res;
 }
 
+void RolloutBuffer::normalize_observations(RunningMeanStd& obs_mstd) {
+    auto obs_stack = observations_data.view({opt.buffer_size * opt.num_envs, -1});
+    obs_mstd.update(obs_stack);
+    observations_data = obs_mstd.apply(observations_data);
+    observations = observations_data.accessor<float, 3>();
+}
+
+void RolloutBuffer::normalize_rewards(RunningMeanStd& rew_mstd) {
+    rew_mstd.update(rewards_data);
+    rewards_data = rew_mstd.apply(rewards_data);
+    rewards = rewards_data.accessor<float, 2>();
+}
+
 PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger)
         : opt(options), policy(policy), logger(logger) {
 
