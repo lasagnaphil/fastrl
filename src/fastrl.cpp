@@ -72,7 +72,7 @@ void init_weights(torch::OrderedDict<std::string, torch::Tensor> parameters,
 
 DiagGaussianDistribution::DiagGaussianDistribution(torch::Tensor mean, torch::Tensor logstd) : mean(std::move(mean)), logstd(std::move(logstd)) {}
 
-torch::Tensor DiagGaussianDistribution::entropy() {
+torch::Tensor DiagGaussianDistribution::entropy() const {
     auto entropies = 0.5f + 0.5f * std::log(2 * M_PI) + logstd;
     return sum_independent_dims(entropies);
 }
@@ -82,14 +82,27 @@ torch::Tensor DiagGaussianDistribution::log_prob(torch::Tensor value) const {
     return sum_independent_dims(log_probs);
 }
 
-torch::Tensor DiagGaussianDistribution::sample(c10::ArrayRef<int64_t> sample_shape) const {
-    auto no_grad_guard = torch::NoGradGuard();
-    if (sample_shape.empty()) {
-        return at::normal(mean, logstd.exp());
-    }
-    else {
-        return at::normal(mean.expand(sample_shape), logstd.exp().expand(sample_shape));
-    }
+torch::Tensor DiagGaussianDistribution::sample() const {
+    return at::normal(mean, logstd.exp());
+}
+
+BernoulliDistribution::BernoulliDistribution(torch::Tensor logits) : logits(logits) {
+    probs = torch::sigmoid(logits);
+}
+
+torch::Tensor BernoulliDistribution::entropy() const {
+    auto entropies = torch::binary_cross_entropy_with_logits(logits, probs, {}, {}, torch::Reduction::None);
+    return sum_independent_dims(entropies);
+}
+
+torch::Tensor BernoulliDistribution::log_prob(torch::Tensor value) const {
+    auto log_probs = -torch::binary_cross_entropy_with_logits(logits, value, {}, {}, torch::Reduction::None);
+    return sum_independent_dims(log_probs);
+}
+
+torch::Tensor BernoulliDistribution::sample() const {
+    torch::NoGradGuard guard {};
+    return torch::bernoulli(probs);
 }
 
 Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
@@ -136,7 +149,7 @@ Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
     actor_mu_nn = register_module("actor_mu_nn", actor_mu_nn);
     critic_seq_nn = register_module("critic_seq_nn", critic_seq_nn);
 
-    if (!opt.fix_log_std) {
+    if (opt.action_dist_type == DistributionType::DiagGaussian && !opt.fix_log_std) {
         actor_log_std = register_parameter("actor_log_std", actor_log_std);
     }
 
@@ -149,11 +162,18 @@ Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
     }
 }
 
-std::pair<DiagGaussianDistribution, torch::Tensor> Policy::forward(torch::Tensor state) {
+std::pair<std::shared_ptr<Distribution>, torch::Tensor> Policy::forward(torch::Tensor state) {
     auto hidden = actor_seq_nn->forward(state);
     auto action_mu = actor_mu_nn->forward(hidden);
     torch::Tensor value = critic_seq_nn->forward(state);
-    return {DiagGaussianDistribution{action_mu, actor_log_std}, value};
+    switch (opt.action_dist_type) {
+        case DistributionType::Bernoulli:
+            return {std::make_shared<BernoulliDistribution>(action_mu), value};
+        case DistributionType::DiagGaussian:
+            return {std::make_shared<DiagGaussianDistribution>(action_mu, actor_log_std), value};
+        default:
+            return {nullptr, value};
+    }
 }
 
 RolloutBuffer::RolloutBuffer(int state_size, int action_size, RolloutBufferOptions options)
@@ -354,6 +374,30 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     std::vector<float> entropy_losses, all_kl_divs, pg_losses, value_losses, clip_fractions;
     float loss_value;
 
+    if (opt.learning_rate_schedule) {
+        if (opt.max_timesteps == -1) {
+            fprintf(stderr, "To use scheduling options, you need to set max_timesteps option!\n");
+            exit(EXIT_FAILURE);
+        }
+        float remaining_progress = std::max(1.0f - (float)num_timesteps / (float)opt.max_timesteps, 0.0f);
+        float cur_learning_rate = opt.learning_rate_schedule(remaining_progress);
+        for (auto& param_group : optimizer->param_groups()) {
+            dynamic_cast<torch::optim::AdamOptions&>(param_group.options()).lr(cur_learning_rate);
+        }
+        logger->add_scalar("train/learning_rate", iter, cur_learning_rate);
+    }
+
+    float cur_clip_range = opt.clip_range;
+    if (opt.clip_range_schedule) {
+        if (opt.max_timesteps == -1) {
+            fprintf(stderr, "To use scheduling options, you need to set max_timesteps option!\n");
+            exit(EXIT_FAILURE);
+        }
+        float remaining_progress = std::max(1.0f - (float)num_timesteps / (float)opt.max_timesteps, 0.0f);
+        cur_clip_range = opt.clip_range_schedule(remaining_progress);
+        logger->add_scalar("train/clip_range", iter, cur_clip_range);
+    }
+
     for (int sgd_iters = 0; sgd_iters < opt.num_epochs; sgd_iters++) {
         std::vector<float> approx_kl_divs;
 
@@ -369,20 +413,20 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
 
             auto [action_dist, values] = policy->forward(observations);
             values = values.flatten();
-            auto log_prob = action_dist.log_prob(observations);
-            auto entropy = action_dist.entropy();
+            auto log_prob = action_dist->log_prob(observations);
+            auto entropy = action_dist->entropy();
 
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8f);
 
             auto ratio = torch::exp(log_prob - old_log_prob);
 
             auto policy_loss_1 = advantages * ratio;
-            auto policy_loss_2 = advantages * torch::clamp(ratio, 1.f - opt.clip_range, 1.f + opt.clip_range);
+            auto policy_loss_2 = advantages * torch::clamp(ratio, 1.f - cur_clip_range, 1.f + cur_clip_range);
             auto policy_loss = -torch::min(policy_loss_1, policy_loss_2).mean();
 
             pg_losses.push_back(policy_loss.item<float>());
             auto clip_fraction = torch::mean(
-                    (torch::abs(ratio - 1.f) > opt.clip_range).toType(torch::kFloat32));
+                    (torch::abs(ratio - 1.f) > cur_clip_range).toType(torch::kFloat32));
             clip_fractions.push_back(clip_fraction.item<float>());
 
             torch::Tensor value_loss;
@@ -426,6 +470,7 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             break;
         }
     }
+    num_timesteps += num_batches * batches[0].returns.size(0);
 
     logger->add_scalar("train/entropy_loss", iter, get_mean(entropy_losses));
     logger->add_scalar("train/policy_gradient_loss", iter, get_mean(pg_losses));

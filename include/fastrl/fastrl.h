@@ -17,27 +17,53 @@ enum class NNActivationType {
     ReLU, Tanh
 };
 
-struct DiagGaussianDistribution {
+struct Distribution {
+    virtual torch::Tensor entropy() const = 0;
+    virtual torch::Tensor log_prob(torch::Tensor value) const = 0;
+    virtual torch::Tensor sample() const = 0;
+    virtual ~Distribution() = default;
+};
+
+struct DiagGaussianDistribution : public Distribution {
     torch::Tensor mean;
     torch::Tensor logstd;
 
     DiagGaussianDistribution(torch::Tensor mean, torch::Tensor logstd);
 
-    torch::Tensor entropy();
+    torch::Tensor entropy() const override;
+
+    torch::Tensor log_prob(torch::Tensor value) const override;
+
+    torch::Tensor sample() const override;
+};
+
+struct BernoulliDistribution : public Distribution {
+    torch::Tensor logits;
+    torch::Tensor probs;
+
+    explicit BernoulliDistribution(torch::Tensor logits);
+
+    torch::Tensor entropy() const;
 
     torch::Tensor log_prob(torch::Tensor value) const;
 
-    torch::Tensor sample(c10::ArrayRef<int64_t> sample_shape = {}) const;
+    torch::Tensor sample() const;
+};
 
+enum class DistributionType {
+    Bernoulli, DiagGaussian
 };
 
 struct PolicyOptions {
+    DistributionType action_dist_type = DistributionType::DiagGaussian;
+
     std::vector<int> actor_hidden_dim = {256, 256};
     std::vector<int> critic_hidden_dim = {256, 256};
     NNActivationType activation_type = NNActivationType::ReLU;
     float log_std_init = 0.0f;
     bool fix_log_std = false;
     bool ortho_init = true;
+
     torch::Device device = torch::kCPU;
 };
 
@@ -45,7 +71,7 @@ class Policy : public torch::nn::Module {
 public:
     Policy(int state_size, int action_size, const PolicyOptions& options);
 
-    std::pair<DiagGaussianDistribution, torch::Tensor> forward(torch::Tensor state);
+    std::pair<std::shared_ptr<Distribution>, torch::Tensor> forward(torch::Tensor state);
 
     int state_size, action_size;
     PolicyOptions opt;
@@ -98,9 +124,12 @@ public:
 };
 
 struct PPOOptions {
+    int64_t max_timesteps = -1;
     int num_epochs = 10;
     float learning_rate = 3e-4f;
+    std::function<float(float)> learning_rate_schedule = nullptr;
     float clip_range = 0.2f;
+    std::function<float(float)> clip_range_schedule = nullptr;
     bool clip_range_vf_enabled = false;
     float clip_range_vf = 0.0f;
     bool entropy_enabled = true;
@@ -125,7 +154,36 @@ public:
     std::shared_ptr<torch::optim::Optimizer> optimizer;
 
     std::shared_ptr<TensorBoardLogger> logger;
-    int iter = 0;
+
+    int64_t iter = 0;
+    int64_t num_timesteps = 0;
+};
+
+struct RunningMeanStd {
+    torch::Tensor mean;
+    torch::Tensor var;
+    int state_size;
+    int64_t count = 0;
+
+    RunningMeanStd(int state_size) : state_size(state_size) {
+        mean = torch::zeros({state_size});
+        var = torch::zeros({state_size});
+    }
+
+    void update(torch::Tensor arr) {
+        auto batch_mean = torch::mean(arr, {0});
+        auto batch_var = torch::var(arr, {0});
+        int64_t batch_count = arr.size(0);
+    }
+
+    void update_from_moments(torch::Tensor batch_mean, torch::Tensor batch_var, int64_t batch_count) {
+        auto delta = batch_mean - mean;
+        int64_t tot_count = count + batch_count;
+
+        mean = mean + delta * batch_count / tot_count;
+        var = (var * count + batch_var * batch_count + delta.square() * count * batch_count / tot_count) / tot_count;
+        count = tot_count;
+    }
 };
 
 }

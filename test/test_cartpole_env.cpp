@@ -12,28 +12,33 @@ int main(int argc, char** argv) {
     // google::SetStderrLogging(google::ERROR);
 
     auto device = torch::kCPU;
-    int num_envs = 20;
+    int num_envs = 8;
     bool eval_enabled = true;
 
     auto policy_opt = fastrl::PolicyOptions();
+    policy_opt.action_dist_type = fastrl::DistributionType::Bernoulli;
     policy_opt.actor_hidden_dim = {256, 256};
     policy_opt.critic_hidden_dim = {256, 256};
     policy_opt.activation_type = fastrl::NNActivationType::Tanh;
     policy_opt.device = device;
+    policy_opt.ortho_init = false;
 
     auto rb_opt = fastrl::RolloutBufferOptions();
-    rb_opt.gae_lambda = 0.9f;
-    rb_opt.gamma = 0.95f;
-    rb_opt.buffer_size = 512;
+    rb_opt.gae_lambda = 0.8f;
+    rb_opt.gamma = 0.98f;
+    rb_opt.buffer_size = 32;
     rb_opt.num_envs = num_envs;
 
     auto ppo_opt = fastrl::PPOOptions();
-    ppo_opt.learning_rate = 5e-5f;
-    ppo_opt.num_epochs = 10;
-    ppo_opt.clip_range_vf_enabled = false;
+    ppo_opt.max_timesteps = 1e5;
+    // ppo_opt.learning_rate = 3e-4f;
+    ppo_opt.clip_range = 0.2f;
+    ppo_opt.learning_rate_schedule = [](float e) -> float { return 3e-4f * e; };
+    // ppo_opt.clip_range_schedule = [](float e) -> float { return 0.2f * e; };
+    ppo_opt.num_epochs = 20;
     ppo_opt.device = device;
 
-    int sgd_minibatch_size = 64;
+    int sgd_minibatch_size = 256;
 
     using MyEnv = CartpoleEnv;
 
@@ -42,10 +47,10 @@ int main(int argc, char** argv) {
     auto rollout_buffer = fastrl::RolloutBuffer(MyEnv::obs_dim, MyEnv::act_dim, rb_opt);
     auto ppo = fastrl::PPO(ppo_opt, policy, logger);
 
-    std::vector<MyEnv> env(num_envs);
-    MyEnv eval_env;
+    std::vector<MyEnv> env(num_envs, MyEnv(false));
+    MyEnv eval_env(false);
 
-    int max_steps = 1000;
+    int max_steps = 10000;
     for (int step = 1; step <= max_steps; step++) {
         std::vector<float> last_values(num_envs);
         std::vector<int8_t> last_dones(num_envs);
@@ -58,8 +63,8 @@ int main(int argc, char** argv) {
                 auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
                 auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                 float value = value_tensor.item<float>();
-                float action = action_dist.sample().item<float>();
-                float log_prob = action_dist.log_prob(obs_tensor).item<float>();
+                float action = action_dist->sample().item<float>();
+                float log_prob = action_dist->log_prob(obs_tensor).item<float>();
                 auto [new_obs, reward, new_done] = env[e].step(action);
                 rollout_buffer.add(e, obs.data(), &action, reward, done, value, log_prob);
                 obs = new_obs;
@@ -89,7 +94,7 @@ int main(int argc, char** argv) {
         ppo.train(batches.data(), batches.size());
         rollout_buffer.reset();
 
-        if (step % 10 == 0) {
+        if (step % 100 == 0) {
             // Save model
             torch::serialize::OutputArchive output_archive;
             policy->save(output_archive);
@@ -97,7 +102,6 @@ int main(int argc, char** argv) {
 
             // Evaluation
             if (eval_enabled) {
-
 #ifdef USE_RENDERER
                 InitWindow(800, 600, "PendulumV0");
                 SetTargetFPS(60);
@@ -114,11 +118,8 @@ int main(int argc, char** argv) {
                     torch::NoGradGuard guard {};
                     auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
                     auto [action_dist, value_tensor] = policy->forward(obs_tensor);
-                    float action = action_dist.sample().item<float>();
+                    float action = action_dist->sample().item<float>();
                     auto [new_obs, reward, new_done] = eval_env.step(action);
-                    // auto [new_obs, reward, new_done] = eval_env.step(-1.f * (eval_env.state[0]) - 1.f * (eval_env.state[1]));
-                    // std::printf("State: [%f %f %f]\n", obs[0], obs[1], obs[2]);
-                    // std::printf("Reward: %f\n", reward);
                     episode_reward += reward;
                     obs = new_obs;
                     done = new_done;

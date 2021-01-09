@@ -16,6 +16,7 @@ int main(int argc, char** argv) {
     bool eval_enabled = false;
 
     auto policy_opt = fastrl::PolicyOptions();
+    policy_opt.action_dist_type = fastrl::DistributionType::DiagGaussian;
     policy_opt.actor_hidden_dim = {256, 256};
     policy_opt.critic_hidden_dim = {256, 256};
     policy_opt.activation_type = fastrl::NNActivationType::Tanh;
@@ -60,8 +61,8 @@ int main(int argc, char** argv) {
                 auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
                 auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                 float value = value_tensor.item<float>();
-                float action = action_dist.sample().item<float>();
-                float log_prob = action_dist.log_prob(obs_tensor).item<float>();
+                float action = action_dist->sample().item<float>();
+                float log_prob = action_dist->log_prob(obs_tensor).item<float>();
                 auto [new_obs, reward, new_done] = env[e].step(action);
                 rollout_buffer.add(e, obs.data(), &action, reward, done, value, log_prob);
                 obs = new_obs;

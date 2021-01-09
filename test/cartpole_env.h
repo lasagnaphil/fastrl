@@ -25,7 +25,7 @@ struct CartpoleEnv {
     float masspole = 0.1f;
     float total_mass = 1.0f + 0.1f;
     float length = 0.5f;
-    float polemass_length = 0.1f + 0.5f;
+    float polemass_length = 0.1f * 0.5f;
     float force_mag = 10.0f;
     float tau = 0.02f;
     float theta_threshold_radians = 12.f * 2.f * M_PI / 360;
@@ -39,7 +39,9 @@ struct CartpoleEnv {
     std::array<float, obs_dim> state;
     std::default_random_engine random_engine;
 
-    CartpoleEnv() {
+    bool continuous_action_space;
+
+    CartpoleEnv(bool continuous_action_space = false) : continuous_action_space(continuous_action_space) {
         seed();
         reset();
     }
@@ -48,9 +50,15 @@ struct CartpoleEnv {
         random_engine.seed(seed);
     }
 
-    std::tuple<std::array<float, obs_dim>, float, bool> step(float action) {
+    std::tuple<std::array<float, 4>, float, bool> step(float action) {
         auto [x, x_dot, theta, theta_dot] = state;
-        float force = std::min(std::max(action, -force_mag), force_mag);
+        float force;
+        if (continuous_action_space) {
+            force = std::min(std::max(force_mag * action, -force_mag), force_mag);
+        }
+        else {
+            force = action > 0.5f? force_mag : -force_mag;
+        }
         float costheta = std::cos(theta);
         float sintheta = std::sin(theta);
 
@@ -88,7 +96,7 @@ struct CartpoleEnv {
         return {state, reward, done};
     }
 
-    std::array<float, obs_dim> reset() {
+    std::array<float, 4> reset() {
         for (int i = 0; i < 4; i++) {
             state[i] = std::uniform_real_distribution<float>(-0.05, 0.05)(random_engine);
         }
