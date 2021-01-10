@@ -17,25 +17,29 @@ int main(int argc, char** argv) {
 
     auto policy_opt = fastrl::PolicyOptions();
     policy_opt.action_dist_type = fastrl::DistributionType::Bernoulli;
-    policy_opt.actor_hidden_dim = {256, 256};
-    policy_opt.critic_hidden_dim = {256, 256};
+    policy_opt.actor_hidden_dim = {32, 32};
+    policy_opt.critic_hidden_dim = {32, 32};
     policy_opt.activation_type = fastrl::NNActivationType::Tanh;
     policy_opt.device = device;
     policy_opt.ortho_init = false;
 
     auto rb_opt = fastrl::RolloutBufferOptions();
-    rb_opt.gae_lambda = 0.5f;
-    rb_opt.gamma = 0.98f;
-    rb_opt.buffer_size = 32;
+    rb_opt.gae_lambda = 0.8f;
+    rb_opt.gamma = 0.99f;
+    rb_opt.buffer_size = 512;
     rb_opt.num_envs = num_envs;
 
     auto ppo_opt = fastrl::PPOOptions();
-    // ppo_opt.max_timesteps = 1e5;
+    ppo_opt.max_timesteps = 4e6;
     ppo_opt.learning_rate = 1e-3f;
     ppo_opt.clip_range = 0.2f;
     // ppo_opt.learning_rate_schedule = [](float e) -> float { return 1e-3f * e; };
     // ppo_opt.clip_range_schedule = [](float e) -> float { return 0.2f * e; };
-    ppo_opt.num_epochs = 20;
+    ppo_opt.entropy_enabled = true;
+    ppo_opt.ent_coef = 0.1f;
+    // ppo_opt.clip_range_vf_enabled = true;
+    // ppo_opt.clip_range_vf = 1.0f;
+    ppo_opt.num_epochs = 6;
     ppo_opt.device = device;
 
     int sgd_minibatch_size = 256;
