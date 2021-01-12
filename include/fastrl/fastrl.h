@@ -9,7 +9,10 @@
 #include <random>
 
 #include <torch/torch.h>
+#include <c10d/FileStore.hpp>
+#include <c10d/ProcessGroup.hpp>
 #include "tensorboard_logger.h"
+#include <mpi.h>
 
 namespace fastrl {
 
@@ -160,6 +163,10 @@ public:
     std::vector<int> pos;
 };
 
+enum class DistributedBackend {
+    None, Gloo, MPI, NCCL
+};
+
 struct PPOOptions {
     int64_t max_timesteps = -1;
     int num_epochs = 10;
@@ -182,6 +189,8 @@ struct PPOOptions {
 class PPO {
 public:
     PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger);
+    PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
+        std::shared_ptr<c10d::ProcessGroup> process_group);
 
     void train(const RolloutBufferBatch* batches, int num_batches);
 
@@ -191,9 +200,12 @@ public:
     std::shared_ptr<torch::optim::Optimizer> optimizer;
 
     std::shared_ptr<TensorBoardLogger> logger;
-
-    int64_t iter = 0;
+    int iter = 0;
     int64_t num_timesteps = 0;
+
+    std::shared_ptr<c10d::ProcessGroup> process_group;
+    DistributedBackend dist_backend = DistributedBackend::None;
+    int dist_rank, dist_size;
 };
 
 }

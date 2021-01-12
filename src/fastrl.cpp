@@ -4,6 +4,9 @@
 
 #include "fastrl/fastrl.h"
 
+#include <c10d/ProcessGroupMPI.hpp>
+#include <c10d/ProcessGroupGloo.hpp>
+
 namespace fastrl {
 
 torch::Tensor sum_independent_dims(torch::Tensor tensor) {
@@ -371,12 +374,34 @@ void RolloutBuffer::normalize_rewards(RunningMeanStd& rew_mstd) {
 }
 
 PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger)
-        : opt(options), policy(policy), logger(logger) {
+        : opt(options), policy(std::move(policy)), logger(std::move(logger)) {
 
     optimizer = std::make_shared<torch::optim::Adam>(
-            policy->parameters(), torch::optim::AdamOptions(opt.learning_rate));
+            this->policy->parameters(), torch::optim::AdamOptions(opt.learning_rate));
+
+    dist_backend = DistributedBackend::None;
 }
 
+PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
+         std::shared_ptr<c10d::ProcessGroup> process_group)
+         : PPO(options, std::move(policy), std::move(logger)) {
+
+    if (dynamic_cast<c10d::ProcessGroupMPI*>(process_group.get())) {
+        dist_backend = DistributedBackend::MPI;
+    }
+    else if (dynamic_cast<c10d::ProcessGroupGloo*>(process_group.get())) {
+        dist_backend = DistributedBackend::Gloo;
+    }
+    else {
+        fprintf(stderr, "ProcessGroupNCCL not supported!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    this->process_group = process_group;
+
+    dist_rank = process_group->getRank();
+    dist_size = process_group->getSize();
+}
 
 float get_mean(const std::vector<float>& vec) {
     return std::accumulate(vec.begin(), vec.end(), 0.f) / vec.size();
@@ -472,7 +497,34 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
 
             optimizer->zero_grad();
             loss.backward();
-            torch::nn::utils::clip_grad_norm_(policy->parameters(), opt.max_grad_norm);
+
+            auto params = policy->parameters();
+            if (dist_backend != DistributedBackend::None) {
+                std::vector<std::shared_ptr<c10d::ProcessGroup::Work>> works;
+                for (auto& param : params) {
+                    std::vector<torch::Tensor> tmp = {param.grad().data()};
+                    works.push_back(std::move(process_group->allreduce(tmp)));
+                }
+
+                for (auto& work : works) {
+                    try {
+                        work->wait();
+                    } catch (const std::exception& ex) {
+                        std::cerr << "Exception received: " << ex.what() << std::endl;
+                        if (dist_backend == DistributedBackend::MPI) {
+                            dynamic_cast<c10d::ProcessGroupMPI*>(process_group.get())->abort();
+                        }
+                        else if (dist_backend == DistributedBackend::Gloo) {
+                            exit(EXIT_FAILURE);
+                        }
+                    }
+                }
+                for (auto& param : params) {
+                    param.grad().div_(dist_size);
+                }
+            }
+
+            torch::nn::utils::clip_grad_norm_(params, opt.max_grad_norm);
             optimizer->step();
         }
         float kl_div_mean = get_mean(approx_kl_divs);
@@ -485,12 +537,14 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     }
     num_timesteps += num_batches * batches[0].returns.size(0);
 
-    logger->add_scalar("train/entropy_loss", iter, get_mean(entropy_losses));
-    logger->add_scalar("train/policy_gradient_loss", iter, get_mean(pg_losses));
-    logger->add_scalar("train/value_loss", iter, get_mean(value_losses));
-    logger->add_scalar("train/approx_kl", iter, get_mean(all_kl_divs));
-    logger->add_scalar("train/clip_fraction", iter, get_mean(clip_fractions));
-    logger->add_scalar("train/loss", iter, loss_value);
+    if (logger) {
+        logger->add_scalar("train/entropy_loss", iter, get_mean(entropy_losses));
+        logger->add_scalar("train/policy_gradient_loss", iter, get_mean(pg_losses));
+        logger->add_scalar("train/value_loss", iter, get_mean(value_losses));
+        logger->add_scalar("train/approx_kl", iter, get_mean(all_kl_divs));
+        logger->add_scalar("train/clip_fraction", iter, get_mean(clip_fractions));
+        logger->add_scalar("train/loss", iter, loss_value);
+    }
 
     iter++;
 
@@ -498,7 +552,6 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     std::printf("Iter results: \n");
     std::printf("entropy_loss=%.6f, kl_div_mean=%.6f, pg_loss=%.6f, value_loss=%.6f, clip_fraction=%.6f\n",
                 get_mean(entropy_losses), get_mean(all_kl_divs), get_mean(pg_losses), get_mean(value_losses), get_mean(clip_fractions));
-
 }
 
 }

@@ -4,6 +4,15 @@
 
 #define USE_RENDERER
 
+// #define USE_MPI
+// #define USE_GLOO
+
+#if defined(USE_MPI)
+#include <c10d/ProcessGroupMPI.hpp>
+#elif defined(USE_GLOO)
+#include <c10d/ProcessGroupGloo.hpp>
+#endif
+
 #include "mountaincar_env.h"
 #include "fastrl/fastrl.h"
 
@@ -40,13 +49,33 @@ int main(int argc, char** argv) {
 
     int sgd_minibatch_size = 64;
 
-    auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto policy = std::make_shared<fastrl::Policy>(MountainCarEnv::obs_dim, MountainCarEnv::act_dim, policy_opt);
     auto rollout_buffer = fastrl::RolloutBuffer(MountainCarEnv::obs_dim, MountainCarEnv::act_dim, rb_opt);
+#if defined(USE_MPI)
+    auto process_group = c10d::ProcessGroupMPI::createProcessGroupMPI();
+    auto logger = process_group->getRank() == 0? std::make_shared<TensorBoardLogger>("logs/tfevents.pb") : nullptr;
+    auto ppo = fastrl::PPO(ppo_opt, policy, logger, process_group);
+#elif defined(USE_GLOO)
+    auto file_store = std::make_shared<c10d::Store>("tmp/c10d_gloo");
+    auto process_group = c10d::ProcessGroupGloo(file_store, atoi(getenv("RANK")), atoi(getenv("SIZE")));
+    auto logger = process_group->getRank() == 0? std::make_shared<TensorBoardLogger>("logs/tfevents.pb") : nullptr;
+    auto ppo = fastrl::PPO(ppo_opt, policy, logger, process_group);
+#else
+    auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto ppo = fastrl::PPO(ppo_opt, policy, logger);
+#endif
 
     std::vector<MountainCarEnv> env(num_envs);
     MountainCarEnv eval_env;
+
+    for (int e = 0; e < num_envs; e++) {
+#if defined(USE_MPI) or defined(USE_GLOO)
+        int seed = process_group->getRank() * num_envs + e;
+#else
+        int seed = e;
+#endif
+        env[e].seed(seed);
+    }
 
     int max_steps = 1000;
     for (int step = 1; step <= max_steps; step++) {
@@ -83,7 +112,9 @@ int main(int argc, char** argv) {
 
         rollout_buffer.compute_returns_and_advantage(last_values.data(), last_dones.data());
         float avg_episode_reward = rollout_buffer.get_average_episode_reward();
-        logger->add_scalar("train/avg_episode_reward", ppo.iter, avg_episode_reward);
+        if (logger) {
+            logger->add_scalar("train/avg_episode_reward", ppo.iter, avg_episode_reward);
+        }
         std::printf("Average reward: %f\n", avg_episode_reward);
 
         auto batches = rollout_buffer.get_samples(sgd_minibatch_size);
@@ -92,7 +123,7 @@ int main(int argc, char** argv) {
         ppo.train(batches.data(), batches.size());
         rollout_buffer.reset();
 
-        if (step % 10 == 0) {
+        if (logger && step % 10 == 0) {
             // Save model
             torch::serialize::OutputArchive output_archive;
             policy->save(output_archive);
