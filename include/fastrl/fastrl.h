@@ -11,7 +11,6 @@
 #include <torch/torch.h>
 #include <c10d/FileStore.hpp>
 #include <c10d/ProcessGroup.hpp>
-#include <c10d/ProcessGroupMPI.hpp>
 #include "tensorboard_logger.h"
 #include <mpi.h>
 
@@ -124,7 +123,7 @@ class PPO {
 public:
     PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger);
     PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
-        std::shared_ptr<c10d::ProcessGroupMPI> process_group);
+        std::shared_ptr<c10d::ProcessGroup> process_group);
 
     void train(const RolloutBufferBatch* batches, int num_batches);
 
@@ -136,11 +135,9 @@ public:
     std::shared_ptr<TensorBoardLogger> logger;
     int iter = 0;
 
-    std::shared_ptr<c10d::Store> file_store;
     std::shared_ptr<c10d::ProcessGroup> process_group;
     DistributedBackend dist_backend = DistributedBackend::None;
     int dist_rank, dist_size;
-    MPI_Comm comm;
 };
 
 }

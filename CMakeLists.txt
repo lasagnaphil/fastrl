@@ -13,7 +13,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
 add_library(fastrl src/fastrl.cpp)
 set_target_properties(fastrl PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
-target_include_directories(fastrl PUBLIC include)
+target_include_directories(fastrl PUBLIC include ${MPI_C_INCLUDE_PATH} ${MPI_CXX_INCLUDE_PATH})
 
 if (MPI_COMPILE_FLAGS)
     set_target_properties(fastrl PROPERTIES COMPILE_FLAGS ${MPI_COMPILE_FLAGS})
@@ -23,11 +23,9 @@ if (MPI_LINK_FLAGS)
     set_target_properties(fastrl PROPERTIES LINK_FLAGS ${MPI_LINK_FLAGS})
 endif()
 
-if (TARGET c10d)
-    MESSAGE("c10d Found!")
-endif()
-
-set(FASTRL_LIBS ${TORCH_LIBRARIES} MPI::MPI_C)
+set(FASTRL_LIBS ${TORCH_LIBRARIES} ${MPI_LIBRARIES}
+        ${CMAKE_PREFIX_PATH}/lib/libc10d.a ${CMAKE_PREFIX_PATH}/lib/libgloo.a
+        pthread)
 
 add_subdirectory(deps/tensorboard_logger)
 set(FASTRL_LIBS tensorboard_logger ${FASTRL_LIBS})

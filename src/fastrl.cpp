@@ -5,6 +5,7 @@
 #include "fastrl/fastrl.h"
 
 #include <c10d/ProcessGroupMPI.hpp>
+#include <c10d/ProcessGroupGloo.hpp>
 
 namespace fastrl {
 
@@ -341,19 +342,27 @@ PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<Ten
         : opt(options), policy(std::move(policy)), logger(std::move(logger)) {
 
     optimizer = std::make_shared<torch::optim::Adam>(
-            policy->parameters(), torch::optim::AdamOptions(opt.learning_rate));
+            this->policy->parameters(), torch::optim::AdamOptions(opt.learning_rate));
 
-    dist_backend = DistributedBackend::MPI;
-    process_group = c10d::ProcessGroupMPI::createProcessGroupMPI();
-    dist_rank = process_group->getRank();
-    dist_size = process_group->getSize();
+    dist_backend = DistributedBackend::None;
 }
 
 PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
-         std::shared_ptr<c10d::ProcessGroupMPI> process_group) : PPO(options, std::move(policy), std::move(logger)) {
+         std::shared_ptr<c10d::ProcessGroup> process_group)
+         : PPO(options, std::move(policy), std::move(logger)) {
 
-    dist_backend = DistributedBackend::MPI;
-    this->process_group = std::dynamic_pointer_cast<c10d::ProcessGroup, c10d::ProcessGroupMPI>(process_group);
+    if (dynamic_cast<c10d::ProcessGroupMPI*>(process_group.get())) {
+        dist_backend = DistributedBackend::MPI;
+    }
+    else if (dynamic_cast<c10d::ProcessGroupGloo*>(process_group.get())) {
+        dist_backend = DistributedBackend::Gloo;
+    }
+    else {
+        fprintf(stderr, "ProcessGroupNCCL not supported!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    this->process_group = process_group;
 
     dist_rank = process_group->getRank();
     dist_size = process_group->getSize();
@@ -364,6 +373,7 @@ float get_mean(const std::vector<float>& vec) {
 }
 
 void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
+    std::cout << "Train starting..." << std::endl;
     // buffers for logging
     std::vector<float> entropy_losses, all_kl_divs, pg_losses, value_losses, clip_fractions;
     float loss_value;
@@ -430,21 +440,33 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             optimizer->zero_grad();
             loss.backward();
 
+            auto params = policy->parameters();
             if (dist_backend != DistributedBackend::None) {
-                auto params = policy->named_parameters();
-                std::vector<torch::Tensor> grads(policy->named_parameters().size());
-                std::transform(params.begin(), params.end(), grads.begin(), [](auto& item) {
-                    return item.value().grad().alias();
-                });
+                std::vector<std::shared_ptr<c10d::ProcessGroup::Work>> works;
+                for (auto& param : params) {
+                    std::vector<torch::Tensor> tmp = {param.grad().data()};
+                    works.push_back(std::move(process_group->allreduce(tmp)));
+                }
 
-                auto grad_allreduce_work = process_group->allreduce(grads);
-                grad_allreduce_work->wait();
-                for (auto& grad : grads) {
-                    grad.div_(dist_size);
+                for (auto& work : works) {
+                    try {
+                        work->wait();
+                    } catch (const std::exception& ex) {
+                        std::cerr << "Exception received: " << ex.what() << std::endl;
+                        if (dist_backend == DistributedBackend::MPI) {
+                            dynamic_cast<c10d::ProcessGroupMPI*>(process_group.get())->abort();
+                        }
+                        else if (dist_backend == DistributedBackend::Gloo) {
+                            exit(EXIT_FAILURE);
+                        }
+                    }
+                }
+                for (auto& param : params) {
+                    param.grad().div_(dist_size);
                 }
             }
 
-            torch::nn::utils::clip_grad_norm_(policy->parameters(), opt.max_grad_norm);
+            torch::nn::utils::clip_grad_norm_(params, opt.max_grad_norm);
             optimizer->step();
         }
         float kl_div_mean = get_mean(approx_kl_divs);

@@ -2,12 +2,20 @@
 // Created by lasagnaphil on 21. 1. 3..
 //
 
-#define USE_RENDERER
+// #define USE_EVALUATION
+
 #define USE_MPI
+// #define USE_GLOO
+
+#if defined(USE_MPI)
+#include <c10d/ProcessGroupMPI.hpp>
+#elif defined(USE_GLOO)
+#include <c10d/ProcessGroupGloo.hpp>
+#endif
 
 #include "pendulum_env.h"
 #include "fastrl/fastrl.h"
-#ifdef USE_RENDERER
+#ifdef USE_EVALUATION
 #include <raylib.h>
 #endif
 
@@ -41,10 +49,21 @@ int main(int argc, char** argv) {
 
     int sgd_minibatch_size = 64;
 
+    torch::manual_seed(0);
+
     auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
     auto rollout_buffer = fastrl::RolloutBuffer(3, 1, rb_opt);
+#if defined(USE_MPI)
+    auto process_group = c10d::ProcessGroupMPI::createProcessGroupMPI();
+    auto ppo = fastrl::PPO(ppo_opt, policy, logger, process_group);
+#elif defined(USE_GLOO)
+    auto file_store = std::make_shared<c10d::Store>("tmp/c10d_gloo");
+    auto process_group = c10d::ProcessGroupGloo(file_store, atoi(getenv("RANK")), atoi(getenv("SIZE")));
+    auto ppo = fastrl::PPO(ppo_opt, policy, logger, process_group);
+#else
     auto ppo = fastrl::PPO(ppo_opt, policy, logger);
+#endif
 
     std::vector<PendulumEnv> env(num_envs);
     PendulumEnv eval_env;
@@ -102,7 +121,7 @@ int main(int argc, char** argv) {
             // Evaluation
             if (eval_enabled) {
 
-#ifdef USE_RENDERER
+#ifdef USE_EVALUATION
                 InitWindow(800, 600, "PendulumV0");
                 SetTargetFPS(60);
 
