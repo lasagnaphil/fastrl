@@ -2,7 +2,7 @@
 // Created by lasagnaphil on 21. 1. 3..
 //
 
-// #define USE_EVALUATION
+#define USE_EVALUATION
 
 #define USE_MPI
 // #define USE_GLOO
@@ -51,17 +51,19 @@ int main(int argc, char** argv) {
 
     torch::manual_seed(0);
 
-    auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
     auto rollout_buffer = fastrl::RolloutBuffer(3, 1, rb_opt);
 #if defined(USE_MPI)
     auto process_group = c10d::ProcessGroupMPI::createProcessGroupMPI();
+    auto logger = process_group->getRank() == 0? std::make_shared<TensorBoardLogger>("logs/tfevents.pb") : nullptr;
     auto ppo = fastrl::PPO(ppo_opt, policy, logger, process_group);
 #elif defined(USE_GLOO)
     auto file_store = std::make_shared<c10d::Store>("tmp/c10d_gloo");
     auto process_group = c10d::ProcessGroupGloo(file_store, atoi(getenv("RANK")), atoi(getenv("SIZE")));
+    auto logger = process_group->getRank() == 0? std::make_shared<TensorBoardLogger>("logs/tfevents.pb") : nullptr;
     auto ppo = fastrl::PPO(ppo_opt, policy, logger, process_group);
 #else
+    auto logger = std::make_shared<TensorBoardLogger>("logs/tfevents.pb");
     auto ppo = fastrl::PPO(ppo_opt, policy, logger);
 #endif
 
@@ -103,7 +105,9 @@ int main(int argc, char** argv) {
 
         rollout_buffer.compute_returns_and_advantage(last_values.data(), last_dones.data());
         float avg_episode_reward = rollout_buffer.get_average_episode_reward();
-        logger->add_scalar("train/avg_episode_reward", ppo.iter, avg_episode_reward);
+        if (logger) {
+            logger->add_scalar("train/avg_episode_reward", ppo.iter, avg_episode_reward);
+        }
         std::printf("Average reward: %f\n", avg_episode_reward);
 
         auto batches = rollout_buffer.get_samples(sgd_minibatch_size);
@@ -112,7 +116,7 @@ int main(int argc, char** argv) {
         ppo.train(batches.data(), batches.size());
         rollout_buffer.reset();
 
-        if (step % 10 == 0) {
+        if (logger && step % 10 == 0) {
             // Save model
             torch::serialize::OutputArchive output_archive;
             policy->save(output_archive);
@@ -120,7 +124,6 @@ int main(int argc, char** argv) {
 
             // Evaluation
             if (eval_enabled) {
-
 #ifdef USE_EVALUATION
                 InitWindow(800, 600, "PendulumV0");
                 SetTargetFPS(60);

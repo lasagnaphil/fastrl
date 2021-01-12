@@ -373,7 +373,6 @@ float get_mean(const std::vector<float>& vec) {
 }
 
 void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
-    std::cout << "Train starting..." << std::endl;
     // buffers for logging
     std::vector<float> entropy_losses, all_kl_divs, pg_losses, value_losses, clip_fractions;
     float loss_value;
@@ -478,12 +477,14 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
         }
     }
 
-    logger->add_scalar("train/entropy_loss", iter, get_mean(entropy_losses));
-    logger->add_scalar("train/policy_gradient_loss", iter, get_mean(pg_losses));
-    logger->add_scalar("train/value_loss", iter, get_mean(value_losses));
-    logger->add_scalar("train/approx_kl", iter, get_mean(all_kl_divs));
-    logger->add_scalar("train/clip_fraction", iter, get_mean(clip_fractions));
-    logger->add_scalar("train/loss", iter, loss_value);
+    if (logger) {
+        logger->add_scalar("train/entropy_loss", iter, get_mean(entropy_losses));
+        logger->add_scalar("train/policy_gradient_loss", iter, get_mean(pg_losses));
+        logger->add_scalar("train/value_loss", iter, get_mean(value_losses));
+        logger->add_scalar("train/approx_kl", iter, get_mean(all_kl_divs));
+        logger->add_scalar("train/clip_fraction", iter, get_mean(clip_fractions));
+        logger->add_scalar("train/loss", iter, loss_value);
+    }
 
     iter++;
 
