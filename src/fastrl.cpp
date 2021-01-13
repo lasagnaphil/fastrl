@@ -4,8 +4,15 @@
 
 #include "fastrl/fastrl.h"
 
+#if defined(FASTRL_MPI)
 #include <c10d/ProcessGroupMPI.hpp>
+#endif
+#if defined(FASTRL_GLOO)
 #include <c10d/ProcessGroupGloo.hpp>
+#endif
+#if defined(FASTRL_NCCL)
+#include <c10d/ProcessGroupNCCL.hpp>
+#endif
 
 namespace fastrl {
 
@@ -386,16 +393,21 @@ PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<Ten
          std::shared_ptr<c10d::ProcessGroup> process_group)
          : PPO(options, std::move(policy), std::move(logger)) {
 
+#if defined(FASTRL_MPI)
     if (dynamic_cast<c10d::ProcessGroupMPI*>(process_group.get())) {
         dist_backend = DistributedBackend::MPI;
     }
-    else if (dynamic_cast<c10d::ProcessGroupGloo*>(process_group.get())) {
+#endif
+#if defined(FASTRL_GLOO)
+    if (dynamic_cast<c10d::ProcessGroupGloo*>(process_group.get())) {
         dist_backend = DistributedBackend::Gloo;
     }
-    else {
-        fprintf(stderr, "ProcessGroupNCCL not supported!\n");
-        exit(EXIT_FAILURE);
+#endif
+#if defined(FASTRL_NCCL)
+    if (dynamic_cast<c10d::ProcessGroupNCCL*>(process_group.get())) {
+        dist_backend = DistributedBackend::NCCL;
     }
+#endif
 
     this->process_group = process_group;
 
@@ -511,12 +523,21 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
                         work->wait();
                     } catch (const std::exception& ex) {
                         std::cerr << "Exception received: " << ex.what() << std::endl;
+#if defined(FASTRL_MPI)
                         if (dist_backend == DistributedBackend::MPI) {
                             dynamic_cast<c10d::ProcessGroupMPI*>(process_group.get())->abort();
                         }
-                        else if (dist_backend == DistributedBackend::Gloo) {
+#endif
+#if defined(FASTRL_GLOO)
+                        if (dist_backend == DistributedBackend::Gloo) {
                             exit(EXIT_FAILURE);
                         }
+#endif
+#if defined(FASTRL_NCCL)
+                        if (dist_backend == DistributedBackend::NCCL) {
+                            exit(EXIT_FAILURE);
+                        }
+#endif
                     }
                 }
                 for (auto& param : params) {

@@ -23,8 +23,18 @@ if (MPI_LINK_FLAGS)
     set_target_properties(fastrl PROPERTIES LINK_FLAGS ${MPI_LINK_FLAGS})
 endif()
 
+if (FASTRL_MPI)
+    target_compile_definitions(fastrl PUBLIC FASTRL_MPI=1)
+endif()
+if (FASTRL_GLOO)
+    target_compile_definitions(fastrl PUBLIC FASTRL_GLOO=1)
+endif()
+if (FASTRL_NCCL)
+    target_compile_definitions(fastrl PUBLIC FASTRL_NCCL=1)
+endif()
+
 set(FASTRL_LIBS ${TORCH_LIBRARIES} ${MPI_LIBRARIES}
-        ${CMAKE_PREFIX_PATH}/lib/libc10d.a ${CMAKE_PREFIX_PATH}/lib/libgloo.a
+        ${TORCH_PREFIX_PATH}/lib/libc10d.a ${TORCH_PREFIX_PATH}/lib/libgloo.a
         pthread)
 
 add_subdirectory(deps/tensorboard_logger)
