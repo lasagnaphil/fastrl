@@ -35,20 +35,20 @@ int main(int argc, char** argv) {
     auto rb_opt = fastrl::RolloutBufferOptions();
     rb_opt.gae_lambda = 0.8f;
     rb_opt.gamma = 0.99f;
-    rb_opt.buffer_size = 512;
+    rb_opt.buffer_size = 32;
     rb_opt.num_envs = num_envs;
 
     auto ppo_opt = fastrl::PPOOptions();
-    ppo_opt.max_timesteps = 4e6;
-    ppo_opt.learning_rate = 1e-3f;
-    ppo_opt.clip_range = 0.2f;
-    // ppo_opt.learning_rate_schedule = [](float e) -> float { return 1e-3f * e; };
-    // ppo_opt.clip_range_schedule = [](float e) -> float { return 0.2f * e; };
+    ppo_opt.max_timesteps = 1e5;
+    // ppo_opt.learning_rate = 1e-3f;
+    // ppo_opt.clip_range = 0.2f;
+    ppo_opt.learning_rate_schedule = [](float e) -> float { return 1e-3f * e; };
+    ppo_opt.clip_range_schedule = [](float e) -> float { return 0.2f * e; };
     ppo_opt.entropy_enabled = true;
-    ppo_opt.ent_coef = 0.1f;
+    ppo_opt.ent_coef = 0.0f;
     // ppo_opt.clip_range_vf_enabled = true;
     // ppo_opt.clip_range_vf = 1.0f;
-    ppo_opt.num_epochs = 6;
+    ppo_opt.num_sgd_iters = 20;
     ppo_opt.device = device;
 
     int sgd_minibatch_size = 256;
@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
         policy->eval();
         for (int e = 0; e < num_envs; e++) {
             auto obs = env[e].reset();
-            bool done;
+            bool done = false;
             for (int i = 0; i < rb_opt.buffer_size; i++) {
                 auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
                 obs_tensor = obs_mstd.apply(obs_tensor);

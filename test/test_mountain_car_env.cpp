@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
 
     auto ppo_opt = fastrl::PPOOptions();
     ppo_opt.learning_rate = 7.77e-5f;
-    ppo_opt.num_epochs = 10;
+    ppo_opt.num_sgd_iters = 10;
     ppo_opt.ent_coef = 0.00429f;
     ppo_opt.clip_range_vf_enabled = false;
     ppo_opt.device = device;

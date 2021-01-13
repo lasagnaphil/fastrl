@@ -114,7 +114,7 @@ struct RunningMeanStd {
         count = tot_count;
     }
 
-    torch::Tensor apply(torch::Tensor value) {
+    torch::Tensor apply(torch::Tensor value) const {
         return torch::clip((value - mean) / (var.sqrt() + epsilon), -clip_value, clip_value);
     }
 };
@@ -169,7 +169,7 @@ enum class DistributedBackend {
 
 struct PPOOptions {
     int64_t max_timesteps = -1;
-    int num_epochs = 10;
+    int num_sgd_iters = 10;
     float learning_rate = 3e-4f;
     std::function<float(float)> learning_rate_schedule = nullptr;
     float clip_range = 0.2f;
@@ -179,9 +179,10 @@ struct PPOOptions {
     bool entropy_enabled = true;
     float ent_coef = 0.0f;
     float vf_coef = 0.5f;
-    float max_grad_norm = 0.5f;
+    bool clip_grad_norm_enabled = false;
+    float clip_grad_norm = 0.5f;
     bool target_kl_enabled = false;
-    float target_kl = 0.0f;
+    float target_kl = 0.01f;
 
     torch::Device device = torch::kCPU;
 };

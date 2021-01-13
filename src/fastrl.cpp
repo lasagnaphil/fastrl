@@ -155,21 +155,27 @@ Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
             critic_seq_nn->push_back(nn::Linear(opt.critic_hidden_dim[i], 1));
         }
     }
+
     actor_seq_nn = register_module("actor_seq_nn", actor_seq_nn);
     actor_mu_nn = register_module("actor_mu_nn", actor_mu_nn);
     critic_seq_nn = register_module("critic_seq_nn", critic_seq_nn);
 
-    if (opt.action_dist_type == DistributionType::DiagGaussian && !opt.fix_log_std) {
-        actor_log_std = register_parameter("actor_log_std", actor_log_std);
+    if (opt.action_dist_type == DistributionType::DiagGaussian) {
+        if (opt.fix_log_std) {
+            actor_log_std = register_buffer("actor_log_std", actor_log_std);
+        }
+        else {
+            actor_log_std = register_parameter("actor_log_std", actor_log_std);
+        }
     }
-
-    this->to(opt.device);
 
     if (opt.ortho_init) {
         init_weights(actor_seq_nn->named_parameters(), std::sqrt(2.f), 0.f);
         init_weights(actor_mu_nn->named_parameters(), std::sqrt(2.f), 0.f);
         init_weights(critic_seq_nn->named_parameters(), std::sqrt(2.f), 0.f);
     }
+
+    this->to(opt.device);
 }
 
 std::pair<std::shared_ptr<Distribution>, torch::Tensor> Policy::forward(torch::Tensor state) {
@@ -314,7 +320,7 @@ float RolloutBuffer::get_average_episode_reward() {
         float episode_reward = 0.0f;
         for (int step = 0; step < opt.buffer_size; step++) {
             episode_reward += rewards[step][e];
-            if (dones[step][e] == 1 || step == opt.num_envs - 1) {
+            if (dones[step][e] == 1 || step == opt.buffer_size - 1) {
                 average_episode_reward += episode_reward;
                 episode_reward = 0.0f;
                 num_episodes++;
@@ -448,7 +454,7 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
         logger->add_scalar("train/clip_range", iter, cur_clip_range);
     }
 
-    for (int sgd_iters = 0; sgd_iters < opt.num_epochs; sgd_iters++) {
+    for (int sgd_iters = 0; sgd_iters < opt.num_sgd_iters; sgd_iters++) {
         std::vector<float> approx_kl_divs;
 
         for (int batch_idx = 0; batch_idx < num_batches; batch_idx++) {
@@ -463,7 +469,7 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
 
             auto [action_dist, values] = policy->forward(observations);
             values = values.flatten();
-            auto log_prob = action_dist->log_prob(observations);
+            auto log_prob = action_dist->log_prob(actions);
             auto entropy = action_dist->entropy();
 
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8f);
@@ -545,7 +551,9 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
                 }
             }
 
-            torch::nn::utils::clip_grad_norm_(params, opt.max_grad_norm);
+            if (opt.clip_grad_norm_enabled) {
+                torch::nn::utils::clip_grad_norm_(params, opt.clip_grad_norm);
+            }
             optimizer->step();
         }
         float kl_div_mean = get_mean(approx_kl_divs);
