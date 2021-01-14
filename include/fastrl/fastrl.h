@@ -24,6 +24,8 @@ struct Distribution {
     virtual torch::Tensor entropy() const = 0;
     virtual torch::Tensor log_prob(torch::Tensor value) const = 0;
     virtual torch::Tensor sample() const = 0;
+    virtual void to_(torch::Device device) = 0;
+
     virtual ~Distribution() = default;
 };
 
@@ -38,6 +40,8 @@ struct DiagGaussianDistribution : public Distribution {
     torch::Tensor log_prob(torch::Tensor value) const override;
 
     torch::Tensor sample() const override;
+
+    void to_(torch::Device device) override { mean = mean.to(device); logstd = logstd.to(device); }
 };
 
 struct BernoulliDistribution : public Distribution {
@@ -51,7 +55,11 @@ struct BernoulliDistribution : public Distribution {
     torch::Tensor log_prob(torch::Tensor value) const;
 
     torch::Tensor sample() const;
+
+    void to_(torch::Device device) override { logits = logits.to(device); probs = probs.to(device); }
 };
+
+torch::Tensor kl_divergence(const Distribution& dist1, const Distribution& dist2);
 
 enum class DistributionType {
     Bernoulli, DiagGaussian
@@ -124,10 +132,13 @@ struct RolloutBufferOptions {
     float gae_lambda = 1.0f;
     float gamma = 0.99f;
     int num_envs = 1;
+    DistributionType action_dist_type = DistributionType::DiagGaussian;
 };
 
 struct RolloutBufferBatch {
-    torch::Tensor observations, actions, old_values, old_log_prob, advantages, returns;
+    torch::Tensor observations, actions;
+    std::shared_ptr<Distribution> actions_dist;
+    torch::Tensor old_values, old_log_prob, advantages, returns;
 };
 
 class RolloutBuffer {
@@ -138,8 +149,8 @@ public:
 
     void compute_returns_and_advantage(const float* last_values, const int8_t* last_dones);
 
-    void add(int env_id, const float* obs, const float* action, float reward,
-             bool done, float value, float log_prob);
+    void add(int env_id, torch::Tensor obs, torch::Tensor action, const Distribution& action_dist,
+             float reward, bool done, float value, float log_prob);
 
     std::vector<RolloutBufferBatch> get_samples(int batch_size);
 
@@ -152,13 +163,13 @@ public:
     int state_size, action_size;
     RolloutBufferOptions opt;
 
-    torch::Tensor observations_data, actions_data, rewards_data, advantages_data,
-            returns_data, dones_data, values_data, log_probs_data;
+    torch::Tensor observations_data, actions_data;
+    std::shared_ptr<Distribution> actions_dist_data;
+    torch::Tensor rewards_data, advantages_data, returns_data, dones_data, values_data, log_probs_data;
 
     torch::TensorAccessor<float, 2> rewards, advantages,
             returns, values, log_probs;
     torch::TensorAccessor<int8_t, 2> dones;
-    torch::TensorAccessor<float, 3> observations, actions;
 
     std::vector<int> pos;
 };
@@ -177,8 +188,9 @@ struct PPOOptions {
     bool clip_range_vf_enabled = false;
     float clip_range_vf = 0.0f;
     bool entropy_enabled = true;
-    float ent_coef = 0.0f;
-    float vf_coef = 0.5f;
+    float kl_coeff = 0.2f;
+    float vf_coeff = 0.5f;
+    float ent_coeff = 0.0f;
     bool clip_grad_norm_enabled = false;
     float clip_grad_norm = 0.5f;
     bool target_kl_enabled = false;
@@ -199,14 +211,16 @@ public:
 
     std::shared_ptr<Policy> policy;
     std::shared_ptr<torch::optim::Optimizer> optimizer;
-
     std::shared_ptr<TensorBoardLogger> logger;
+
     int iter = 0;
     int64_t num_timesteps = 0;
+    float cur_kl_coeff;
 
     std::shared_ptr<c10d::ProcessGroup> process_group;
     DistributedBackend dist_backend = DistributedBackend::None;
     int dist_rank, dist_size;
+
 };
 
 }

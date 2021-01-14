@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     auto ppo_opt = fastrl::PPOOptions();
     ppo_opt.learning_rate = 1e-3f;
     ppo_opt.num_sgd_iters = 10;
-    ppo_opt.ent_coef = 0.0f;
+    ppo_opt.ent_coeff = 0.0f;
     ppo_opt.clip_range_vf_enabled = true;
     ppo_opt.clip_range_vf = 100.0f;
     ppo_opt.device = device;
@@ -95,10 +95,11 @@ int main(int argc, char** argv) {
                 // obs_tensor = obs_mstd.apply(obs_tensor);
                 auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                 float value = value_tensor.item<float>();
-                float action = action_dist->sample().item<float>();
+                auto action_tensor = action_dist->sample();
+                float action = action_tensor.item<float>();
                 float log_prob = action_dist->log_prob(obs_tensor).item<float>();
                 auto [new_obs, reward, new_done] = env[e].step(action);
-                rollout_buffer.add(e, obs.data(), &action, reward, done, value, log_prob);
+                rollout_buffer.add(e, obs_tensor, action_tensor, *action_dist, reward, done, value, log_prob);
                 obs = new_obs;
                 done = new_done;
                 if (done) {

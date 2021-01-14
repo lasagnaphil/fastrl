@@ -115,6 +115,28 @@ torch::Tensor BernoulliDistribution::sample() const {
     return torch::bernoulli(probs);
 }
 
+torch::Tensor kl_divergence(const Distribution &dist1, const Distribution &dist2) {
+    if (auto d1 = dynamic_cast<const DiagGaussianDistribution*>(&dist1)) {
+        if (auto d2 = dynamic_cast<const DiagGaussianDistribution*>(&dist2)) {
+            torch::Tensor std1 = d1->logstd.exp();
+            torch::Tensor std2 = d2->logstd.exp();
+            torch::Tensor kl1 = d2->logstd - d1->logstd;
+            torch::Tensor kl2 = 0.5f * ((std1 - std2).square() + ((d2->mean - d1->mean) / std2).square());
+            return sum_independent_dims(kl1 + kl2 - 0.5f);
+        }
+    }
+    if (auto d1 = dynamic_cast<const BernoulliDistribution*>(&dist1)) {
+        if (auto d2 = dynamic_cast<const BernoulliDistribution*>(&dist2)) {
+            auto invprobs1 = 1.0f - d1->probs;
+            auto invprobs2 = 1.0f - d2->probs;
+            auto kl = d1->probs * (d1->probs.log() - d2->probs.log()) + invprobs1 * (invprobs1.log() - invprobs2.log());
+            return sum_independent_dims(kl);
+        }
+    }
+    fprintf(stderr, "Unimplemented kl_divergence between two distributions...\n");
+    exit(EXIT_FAILURE);
+}
+
 Policy::Policy(int state_size, int action_size, const PolicyOptions& options)
     : state_size(state_size), action_size(action_size), opt(options) {
 
@@ -194,28 +216,31 @@ std::pair<std::shared_ptr<Distribution>, torch::Tensor> Policy::forward(torch::T
 
 RolloutBuffer::RolloutBuffer(int state_size, int action_size, RolloutBufferOptions options)
     : state_size(state_size), action_size(action_size), opt(options), pos(opt.num_envs, 0),
-      observations_data(torch::zeros(
-              {opt.buffer_size, opt.num_envs, state_size})),
-      actions_data(torch::zeros(
-              {opt.buffer_size, opt.num_envs, action_size})),
-      rewards_data(
-              torch::zeros({opt.buffer_size, opt.num_envs})),
-      returns_data(
-              torch::zeros({opt.buffer_size, opt.num_envs})),
+      observations_data(torch::zeros({opt.buffer_size, opt.num_envs, state_size})),
+      actions_data(torch::zeros({opt.buffer_size, opt.num_envs, action_size})),
+      rewards_data(torch::zeros({opt.buffer_size, opt.num_envs})),
+      returns_data(torch::zeros({opt.buffer_size, opt.num_envs})),
       dones_data(torch::zeros({opt.buffer_size, opt.num_envs}).toType(torch::kI8)),
       values_data(torch::zeros({opt.buffer_size, opt.num_envs})),
-      log_probs_data(
-              torch::zeros({opt.buffer_size, opt.num_envs})),
-      advantages_data(
-              torch::zeros({opt.buffer_size, opt.num_envs})),
-      observations(observations_data.accessor<float, 3>()),
-      actions(actions_data.accessor<float, 3>()),
+      log_probs_data(torch::zeros({opt.buffer_size, opt.num_envs})),
+      advantages_data(torch::zeros({opt.buffer_size, opt.num_envs})),
       rewards(rewards_data.accessor<float, 2>()),
       returns(returns_data.accessor<float, 2>()),
       dones(dones_data.accessor<int8_t, 2>()),
       values(values_data.accessor<float, 2>()),
       log_probs(log_probs_data.accessor<float, 2>()),
-      advantages(advantages_data.accessor<float, 2>()) {}
+      advantages(advantages_data.accessor<float, 2>()) {
+
+    if (opt.action_dist_type == DistributionType::DiagGaussian) {
+        actions_dist_data = std::make_shared<DiagGaussianDistribution>(
+                torch::zeros({opt.buffer_size, opt.num_envs, action_size}),
+                torch::zeros({opt.buffer_size, opt.num_envs, action_size}));
+    }
+    else if (opt.action_dist_type == DistributionType::Bernoulli) {
+        actions_dist_data = std::make_shared<BernoulliDistribution>(
+                torch::zeros({opt.buffer_size, opt.num_envs, action_size}));
+    }
+}
 
 void RolloutBuffer::reset() {
     observations_data.zero_();
@@ -228,6 +253,16 @@ void RolloutBuffer::reset() {
     advantages_data.zero_();
     for (int e = 0; e < opt.num_envs; e++) {
         pos[e] = 0;
+    }
+    if (opt.action_dist_type == DistributionType::DiagGaussian) {
+        auto dist = dynamic_cast<const DiagGaussianDistribution*>(actions_dist_data.get());
+        dist->mean.zero_();
+        dist->logstd.zero_();
+    }
+    else if (opt.action_dist_type == DistributionType::Bernoulli) {
+        auto dist = dynamic_cast<const BernoulliDistribution*>(actions_dist_data.get());
+        dist->logits.zero_();
+        dist->probs.zero_();
     }
 }
 
@@ -256,15 +291,27 @@ void RolloutBuffer::compute_returns_and_advantage(const float* last_values, cons
     }
 }
 
-void RolloutBuffer::add(int env_id, const float* obs, const float* action, float reward, bool done, float value,
-                                float log_prob) {
+void RolloutBuffer::add(int env_id, torch::Tensor obs, torch::Tensor action, const Distribution& action_dist,
+                        float reward, bool done, float value, float log_prob) {
     int p = pos[env_id];
     if (p == opt.buffer_size) {
         std::cerr << "Error in get_samples(): RolloutBuffer is full!" << std::endl;
         exit(EXIT_FAILURE);
     }
-    std::copy_n(obs, state_size, observations[p][env_id].data());
-    std::copy_n(action, action_size, actions[p][env_id].data());
+    observations_data[p][env_id] = std::move(obs);
+    actions_data[p][env_id] = std::move(action);
+    if (opt.action_dist_type == DistributionType::DiagGaussian) {
+        auto dist = dynamic_cast<const DiagGaussianDistribution*>(&action_dist);
+        auto data = dynamic_cast<const DiagGaussianDistribution*>(actions_dist_data.get());
+        data->mean[p][env_id] = dist->mean;
+        data->logstd[p][env_id] = dist->logstd;
+    }
+    else if (opt.action_dist_type == DistributionType::Bernoulli) {
+        auto dist = dynamic_cast<const BernoulliDistribution*>(&action_dist);
+        auto data = dynamic_cast<const BernoulliDistribution*>(actions_dist_data.get());
+        data->logits[p][env_id] = dist->logits;
+        data->probs[p][env_id] = dist->probs;
+    }
     rewards[p][env_id] = reward;
     dones[p][env_id] = done? 1 : 0;
     values[p][env_id] = value;
@@ -295,6 +342,15 @@ std::vector<RolloutBufferBatch> RolloutBuffer::get_samples(int batch_size) {
         batch.old_log_prob = torch::empty({batch_size});
         batch.advantages = torch::empty({batch_size});
         batch.returns = torch::empty({batch_size});
+        if (opt.action_dist_type == DistributionType::DiagGaussian) {
+            batch.actions_dist = std::make_shared<DiagGaussianDistribution>(
+                    torch::zeros({batch_size, action_size}),
+                    torch::zeros({batch_size, action_size}));
+        }
+        else if (opt.action_dist_type == DistributionType::Bernoulli) {
+            batch.actions_dist = std::make_shared<BernoulliDistribution>(
+                    torch::zeros({batch_size, action_size}));
+        }
 
         auto batch_indices = c10::IntArrayRef(indices.data() + start_idx, batch_size);
         for (int k = 0; k < batch_size; k++) {
@@ -306,6 +362,26 @@ std::vector<RolloutBufferBatch> RolloutBuffer::get_samples(int batch_size) {
             batch.old_log_prob[k] = log_probs_data[pos_idx][env_idx];
             batch.advantages[k] = advantages_data[pos_idx][env_idx];
             batch.returns[k] = returns_data[pos_idx][env_idx];
+        }
+        if (opt.action_dist_type == DistributionType::DiagGaussian) {
+            auto dist = dynamic_cast<DiagGaussianDistribution *>(batch.actions_dist.get());
+            auto data = dynamic_cast<DiagGaussianDistribution *>(actions_dist_data.get());
+            for (int k = 0; k < batch_size; k++) {
+                int pos_idx = batch_indices[k] / opt.num_envs;
+                int env_idx = batch_indices[k] % opt.num_envs;
+                dist->mean[k] = data->mean[pos_idx][env_idx];
+                dist->logstd[k] = data->logstd[pos_idx][env_idx];
+            }
+        }
+        else if (opt.action_dist_type == DistributionType::Bernoulli) {
+            auto dist = dynamic_cast<BernoulliDistribution*>(batch.actions_dist.get());
+            auto data = dynamic_cast<BernoulliDistribution*>(actions_dist_data.get());
+            for (int k = 0; k < batch_size; k++) {
+                int pos_idx = batch_indices[k] / opt.num_envs;
+                int env_idx = batch_indices[k] % opt.num_envs;
+                dist->logits[k] = data->logits[pos_idx][env_idx];
+                dist->probs[k] = data->probs[pos_idx][env_idx];
+            }
         }
         start_idx += batch_size;
         batches.push_back(batch);
@@ -335,6 +411,7 @@ RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
 
     std::vector<torch::Tensor> observations(num_rbs), actions(num_rbs), rewards(num_rbs), advantages(num_rbs),
                                returns(num_rbs), dones(num_rbs), values(num_rbs), log_probs(num_rbs);
+    std::vector<torch::Tensor> actions_mean(num_rbs), actions_logstd(num_rbs), actions_logits(num_rbs);
 
     int state_size = rbs[0].state_size;
     int action_size = rbs[0].action_size;
@@ -358,6 +435,15 @@ RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
         dones[i] = rb.dones_data;
         values[i] = rb.values_data;
         log_probs[i] = rb.log_probs_data;
+        if (opt.action_dist_type == DistributionType::DiagGaussian) {
+            auto data = dynamic_cast<DiagGaussianDistribution*>(rb.actions_dist_data.get());
+            actions_mean[i] = data->mean;
+            actions_logstd[i] = data->logstd;
+        }
+        else if (opt.action_dist_type == DistributionType::Bernoulli) {
+            auto data = dynamic_cast<BernoulliDistribution*>(rb.actions_dist_data.get());
+            actions_logits[i] = data->logits;
+        }
     }
 
     RolloutBuffer res(state_size, action_size, opt);
@@ -370,6 +456,14 @@ RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
     res.dones_data = torch::cat(dones, 1);
     res.values_data = torch::cat(values, 1);
     res.log_probs_data = torch::cat(log_probs, 1);
+    if (opt.action_dist_type == DistributionType::DiagGaussian) {
+        res.actions_dist_data = std::make_shared<DiagGaussianDistribution>(
+                torch::cat(actions_mean, 1), torch::cat(actions_logstd, 1));
+    }
+    else if (opt.action_dist_type == DistributionType::Bernoulli) {
+        res.actions_dist_data = std::make_shared<BernoulliDistribution>(
+                torch::cat(actions_logits, 1));
+    }
     return res;
 }
 
@@ -377,7 +471,6 @@ void RolloutBuffer::normalize_observations(RunningMeanStd& obs_mstd) {
     auto obs_stack = observations_data.view({opt.buffer_size * opt.num_envs, -1});
     obs_mstd.update(obs_stack);
     observations_data = obs_mstd.apply(observations_data);
-    observations = observations_data.accessor<float, 3>();
 }
 
 void RolloutBuffer::normalize_rewards(RunningMeanStd& rew_mstd) {
@@ -393,6 +486,7 @@ PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<Ten
             this->policy->parameters(), torch::optim::AdamOptions(opt.learning_rate));
 
     dist_backend = DistributedBackend::None;
+    cur_kl_coeff = opt.kl_coeff;
 }
 
 PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
@@ -427,7 +521,7 @@ float get_mean(const std::vector<float>& vec) {
 
 void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     // buffers for logging
-    std::vector<float> entropy_losses, all_kl_divs, pg_losses, value_losses, clip_fractions;
+    std::vector<float> entropy_losses, action_kl_losses, pg_losses, value_losses, clip_fractions;
     float loss_value;
 
     if (opt.learning_rate_schedule) {
@@ -455,7 +549,7 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     }
 
     for (int sgd_iters = 0; sgd_iters < opt.num_sgd_iters; sgd_iters++) {
-        std::vector<float> approx_kl_divs;
+        std::vector<float> action_kl_loss;
 
         for (int batch_idx = 0; batch_idx < num_batches; batch_idx++) {
             const RolloutBufferBatch& batch = batches[batch_idx];
@@ -466,6 +560,8 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             auto old_log_prob = batch.old_log_prob.to(opt.device);
             auto advantages = batch.advantages.to(opt.device);
             auto returns = batch.returns.to(opt.device);
+            auto old_action_dist = batch.actions_dist;
+            old_action_dist->to_(opt.device);
 
             auto [action_dist, values] = policy->forward(observations);
             values = values.flatten();
@@ -484,6 +580,10 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             auto clip_fraction = torch::mean(
                     (torch::abs(ratio - 1.f) > cur_clip_range).toType(torch::kFloat32));
             clip_fractions.push_back(clip_fraction.item<float>());
+
+            // TODO
+            auto action_kl = kl_divergence(*action_dist, *old_action_dist);
+            auto action_loss = action_kl.mean();
 
             torch::Tensor value_loss;
             if (opt.clip_range_vf_enabled) {
@@ -508,10 +608,10 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             }
             entropy_losses.push_back(entropy_loss.item<float>());
 
-            auto loss = policy_loss + opt.ent_coef * entropy_loss + opt.vf_coef * value_loss;
+            auto loss = policy_loss + cur_kl_coeff * action_loss + opt.vf_coeff * value_loss + opt.ent_coeff * entropy_loss;
             loss_value = loss.item<float>();
 
-            approx_kl_divs.push_back(torch::mean(old_log_prob - log_prob).item<float>());
+            action_kl_loss.push_back(action_loss.item<float>());
 
             optimizer->zero_grad();
             loss.backward();
@@ -556,12 +656,16 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             }
             optimizer->step();
         }
-        float kl_div_mean = get_mean(approx_kl_divs);
-        all_kl_divs.push_back(kl_div_mean);
+        float action_kl_loss_this_iter = get_mean(action_kl_loss);
+        action_kl_losses.push_back(action_kl_loss_this_iter);
 
-        if (opt.target_kl_enabled && kl_div_mean > 1.5f * opt.target_kl) {
-            printf("Early stopping at step %d due to reaching max kl: %.2f\n", sgd_iters, kl_div_mean);
-            break;
+        if (opt.target_kl_enabled) {
+            if (action_kl_loss_this_iter > 2.0f * opt.target_kl) {
+                cur_kl_coeff *= 1.5f;
+            }
+            else if (action_kl_loss_this_iter < 0.5f * opt.target_kl) {
+                cur_kl_coeff *= 0.5f;
+            }
         }
     }
     num_timesteps += num_batches * batches[0].returns.size(0);
@@ -569,18 +673,21 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
     if (logger) {
         logger->add_scalar("train/entropy_loss", iter, get_mean(entropy_losses));
         logger->add_scalar("train/policy_gradient_loss", iter, get_mean(pg_losses));
+        logger->add_scalar("train/action_kl_loss", iter, get_mean(action_kl_losses));
         logger->add_scalar("train/value_loss", iter, get_mean(value_losses));
-        logger->add_scalar("train/approx_kl", iter, get_mean(all_kl_divs));
-        logger->add_scalar("train/clip_fraction", iter, get_mean(clip_fractions));
         logger->add_scalar("train/loss", iter, loss_value);
+        logger->add_scalar("train/cur_kl_coeff", iter, cur_kl_coeff);
+        logger->add_scalar("train/clip_fraction", iter, get_mean(clip_fractions));
     }
 
     iter++;
 
-    // std::vector<float> entropy_losses, all_kl_divs, pg_losses, value_losses, clip_fractions;
     std::printf("Iter results: \n");
-    std::printf("entropy_loss=%.6f, kl_div_mean=%.6f, pg_loss=%.6f, value_loss=%.6f, clip_fraction=%.6f\n",
-                get_mean(entropy_losses), get_mean(all_kl_divs), get_mean(pg_losses), get_mean(value_losses), get_mean(clip_fractions));
+    std::printf("entropy_loss=%.6f, action_kl_loss=%.6f, kl_coeff=%.6f, "
+                "pg_loss=%.6f, value_loss=%.6f, clip_fraction=%.6f\n",
+                get_mean(entropy_losses), get_mean(action_kl_losses), cur_kl_coeff,
+                get_mean(pg_losses), get_mean(value_losses), get_mean(clip_fractions));
 }
+
 
 }
