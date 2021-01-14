@@ -4,7 +4,7 @@
 
 #define USE_RENDERER
 
-#define USE_MPI
+// #define USE_MPI
 // #define USE_GLOO
 
 #if defined(USE_MPI)
@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
     rb_opt.gamma = 0.99f;
     rb_opt.buffer_size = 32;
     rb_opt.num_envs = num_envs;
+    rb_opt.action_dist_type = fastrl::DistributionType::Bernoulli;
 
     auto ppo_opt = fastrl::PPOOptions();
     ppo_opt.max_timesteps = 1e5;
@@ -48,6 +49,7 @@ int main(int argc, char** argv) {
     ppo_opt.ent_coeff = 0.0f;
     // ppo_opt.clip_range_vf_enabled = true;
     // ppo_opt.clip_range_vf = 1.0f;
+    ppo_opt.target_kl_enabled = true;
     ppo_opt.num_sgd_iters = 20;
     ppo_opt.device = device;
 
@@ -91,6 +93,7 @@ int main(int argc, char** argv) {
 
         policy->eval();
         for (int e = 0; e < num_envs; e++) {
+            torch::NoGradGuard guard {};
             auto obs = env[e].reset();
             bool done = false;
             for (int i = 0; i < rb_opt.buffer_size; i++) {

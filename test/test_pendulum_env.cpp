@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     // google::SetStderrLogging(google::ERROR);
 
     auto device = torch::kCPU;
-    int num_envs = 16;
+    int num_envs = 8;
     bool eval_enabled = true;
 
     auto policy_opt = fastrl::PolicyOptions();
@@ -35,17 +35,21 @@ int main(int argc, char** argv) {
     policy_opt.device = device;
 
     auto rb_opt = fastrl::RolloutBufferOptions();
-    rb_opt.gae_lambda = 0.1f;
-    rb_opt.gamma = 0.95f;
+    rb_opt.gae_lambda = 0.95f;
+    rb_opt.gamma = 0.99f;
     rb_opt.buffer_size = 200;
     rb_opt.num_envs = num_envs;
 
     auto ppo_opt = fastrl::PPOOptions();
-    ppo_opt.learning_rate = 1e-3f;
+    ppo_opt.learning_rate = 1e-5f;
     ppo_opt.num_sgd_iters = 10;
-    ppo_opt.ent_coeff = 0.0f;
+    ppo_opt.kl_coeff = 0.2f;
     ppo_opt.clip_range_vf_enabled = true;
-    ppo_opt.clip_range_vf = 100.0f;
+    ppo_opt.clip_range_vf = 10.0f;
+    ppo_opt.target_kl_enabled = false;
+    ppo_opt.target_kl = 0.01f;
+    ppo_opt.clip_grad_norm_enabled = true;
+    ppo_opt.clip_grad_norm = 0.5f;
     ppo_opt.device = device;
 
     int sgd_minibatch_size = 64;
@@ -54,7 +58,7 @@ int main(int argc, char** argv) {
 
     auto policy = std::make_shared<fastrl::Policy>(3, 1, policy_opt);
     auto rollout_buffer = fastrl::RolloutBuffer(3, 1, rb_opt);
-    // auto obs_mstd = fastrl::RunningMeanStd(PendulumEnv::obs_dim);
+    auto obs_mstd = fastrl::RunningMeanStd(PendulumEnv::obs_dim);
 #if defined(USE_MPI)
     auto process_group = c10d::ProcessGroupMPI::createProcessGroupMPI();
     auto logger = process_group->getRank() == 0? std::make_shared<TensorBoardLogger>("logs/tfevents.pb") : nullptr;
@@ -88,11 +92,12 @@ int main(int argc, char** argv) {
 
         policy->eval();
         for (int e = 0; e < num_envs; e++) {
+            torch::NoGradGuard guard {};
             auto obs = env[e].reset();
             bool done;
             for (int i = 0; i < rb_opt.buffer_size; i++) {
                 auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
-                // obs_tensor = obs_mstd.apply(obs_tensor);
+                obs_tensor = obs_mstd.apply(obs_tensor);
                 auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                 float value = value_tensor.item<float>();
                 auto action_tensor = action_dist->sample();
@@ -116,13 +121,15 @@ int main(int argc, char** argv) {
             }
         }
 
-        // rollout_buffer.normalize_observations(obs_mstd);
+        rollout_buffer.normalize_observations(obs_mstd);
         rollout_buffer.compute_returns_and_advantage(last_values.data(), last_dones.data());
         float avg_episode_reward = rollout_buffer.get_average_episode_reward();
+        float avg_episode_length = rollout_buffer.get_average_episode_length();
         if (logger) {
             logger->add_scalar("train/avg_episode_reward", ppo.iter, avg_episode_reward);
+            logger->add_scalar("train/avg_episode_length", ppo.iter, avg_episode_length);
         }
-        std::printf("Average reward: %f\n", avg_episode_reward);
+        std::printf("Average reward: %f, Average length: %f\n", avg_episode_reward, avg_episode_length);
 
         auto batches = rollout_buffer.get_samples(sgd_minibatch_size);
 
@@ -153,7 +160,7 @@ int main(int argc, char** argv) {
                 while (!WindowShouldClose()) {
                     torch::NoGradGuard guard {};
                     auto obs_tensor = torch::from_blob(obs.data(), {(int)obs.size()}).to(device);
-                    // obs_tensor = obs_mstd.apply(obs_tensor);
+                    obs_tensor = obs_mstd.apply(obs_tensor);
                     auto [action_dist, value_tensor] = policy->forward(obs_tensor);
                     float action = action_dist->sample().item<float>();
                     auto [new_obs, reward, new_done] = eval_env.step(action);

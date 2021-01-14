@@ -121,7 +121,7 @@ torch::Tensor kl_divergence(const Distribution &dist1, const Distribution &dist2
             torch::Tensor std1 = d1->logstd.exp();
             torch::Tensor std2 = d2->logstd.exp();
             torch::Tensor kl1 = d2->logstd - d1->logstd;
-            torch::Tensor kl2 = 0.5f * ((std1 - std2).square() + ((d2->mean - d1->mean) / std2).square());
+            torch::Tensor kl2 = 0.5f * (std1.square() + (d2->mean - d1->mean).square()) / std2.square();
             return sum_independent_dims(kl1 + kl2 - 0.5f);
         }
     }
@@ -407,6 +407,24 @@ float RolloutBuffer::get_average_episode_reward() {
     return average_episode_reward;
 }
 
+float RolloutBuffer::get_average_episode_length() {
+    float average_episode_length = 0.0f;
+    int num_episodes = 0;
+    for (int e = 0; e < opt.num_envs; e++) {
+        int episode_length = 0;
+        for (int step = 0; step < opt.buffer_size; step++) {
+            episode_length++;
+            if (dones[step][e] == 1 || step == opt.buffer_size - 1) {
+                average_episode_length += (float)episode_length;
+                episode_length = 0;
+                num_episodes++;
+            }
+        }
+    }
+    average_episode_length /= num_episodes;
+    return average_episode_length;
+}
+
 RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
 
     std::vector<torch::Tensor> observations(num_rbs), actions(num_rbs), rewards(num_rbs), advantages(num_rbs),
@@ -581,8 +599,7 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
                     (torch::abs(ratio - 1.f) > cur_clip_range).toType(torch::kFloat32));
             clip_fractions.push_back(clip_fraction.item<float>());
 
-            // TODO
-            auto action_kl = kl_divergence(*action_dist, *old_action_dist);
+            auto action_kl = kl_divergence(*old_action_dist, *action_dist);
             auto action_loss = action_kl.mean();
 
             torch::Tensor value_loss;

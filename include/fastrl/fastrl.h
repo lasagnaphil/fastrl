@@ -155,6 +155,7 @@ public:
     std::vector<RolloutBufferBatch> get_samples(int batch_size);
 
     float get_average_episode_reward();
+    float get_average_episode_length();
 
     static RolloutBuffer merge(const RolloutBuffer* rollout_buffers, int rollout_buffer_count);
     void normalize_observations(RunningMeanStd& obs_mstd);
@@ -188,12 +189,12 @@ struct PPOOptions {
     bool clip_range_vf_enabled = false;
     float clip_range_vf = 0.0f;
     bool entropy_enabled = true;
-    float kl_coeff = 0.2f;
+    float kl_coeff = 0.0f;
     float vf_coeff = 0.5f;
     float ent_coeff = 0.0f;
     bool clip_grad_norm_enabled = false;
     float clip_grad_norm = 0.5f;
-    bool target_kl_enabled = false;
+    bool target_kl_enabled = true;
     float target_kl = 0.01f;
 
     torch::Device device = torch::kCPU;
