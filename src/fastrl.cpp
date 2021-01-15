@@ -3,6 +3,7 @@
 //
 
 #include "fastrl/fastrl.h"
+#include "fastrl/utils.h"
 
 #if defined(FASTRL_MPI)
 #include <c10d/ProcessGroupMPI.hpp>

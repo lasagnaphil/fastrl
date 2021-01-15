@@ -92,7 +92,7 @@ public:
     torch::Tensor actor_log_std;
 };
 
-struct RunningMeanStd {
+struct RunningMeanStd : public torch::nn::Module {
     torch::Tensor mean;
     torch::Tensor var;
     int state_size;
@@ -104,6 +104,8 @@ struct RunningMeanStd {
             : state_size(state_size), clip_value(clip_value), epsilon(epsilon) {
         mean = torch::zeros({state_size});
         var = torch::ones({state_size});
+        mean = register_buffer("mean", mean);
+        var = register_buffer("var", var);
     }
 
     void update(torch::Tensor arr) {

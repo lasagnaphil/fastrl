@@ -33,11 +33,13 @@ if (FASTRL_NCCL)
     target_compile_definitions(fastrl PUBLIC FASTRL_NCCL=1)
 endif()
 
+add_subdirectory(deps/tensorboard_logger)
+add_subdirectory(deps/toml11)
+
 set(FASTRL_LIBS ${TORCH_LIBRARIES} ${MPI_LIBRARIES}
         ${TORCH_PREFIX_PATH}/lib/libc10d.a ${TORCH_PREFIX_PATH}/lib/libgloo.a
-        pthread)
+        pthread toml11)
 
-add_subdirectory(deps/tensorboard_logger)
 set(FASTRL_LIBS tensorboard_logger ${FASTRL_LIBS})
 
 target_link_libraries(fastrl PUBLIC ${FASTRL_LIBS})
