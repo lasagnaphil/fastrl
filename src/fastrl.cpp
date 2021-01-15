@@ -4,16 +4,7 @@
 
 #include "fastrl/fastrl.h"
 #include "fastrl/utils.h"
-
-#if defined(FASTRL_MPI)
-#include <c10d/ProcessGroupMPI.hpp>
-#endif
-#if defined(FASTRL_GLOO)
-#include <c10d/ProcessGroupGloo.hpp>
-#endif
-#if defined(FASTRL_NCCL)
-#include <c10d/ProcessGroupNCCL.hpp>
-#endif
+#include "fastrl/dist_utils.h"
 
 namespace fastrl {
 
@@ -635,43 +626,14 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
             loss.backward();
 
             auto params = policy->parameters();
-            if (dist_backend != DistributedBackend::None) {
-                std::vector<std::shared_ptr<c10d::ProcessGroup::Work>> works;
-                for (auto& param : params) {
-                    std::vector<torch::Tensor> tmp = {param.grad().data()};
-                    works.push_back(std::move(process_group->allreduce(tmp)));
-                }
-
-                for (auto& work : works) {
-                    try {
-                        work->wait();
-                    } catch (const std::exception& ex) {
-                        std::cerr << "Exception received: " << ex.what() << std::endl;
-#if defined(FASTRL_MPI)
-                        if (dist_backend == DistributedBackend::MPI) {
-                            dynamic_cast<c10d::ProcessGroupMPI*>(process_group.get())->abort();
-                        }
-#endif
-#if defined(FASTRL_GLOO)
-                        if (dist_backend == DistributedBackend::Gloo) {
-                            exit(EXIT_FAILURE);
-                        }
-#endif
-#if defined(FASTRL_NCCL)
-                        if (dist_backend == DistributedBackend::NCCL) {
-                            exit(EXIT_FAILURE);
-                        }
-#endif
-                    }
-                }
-                for (auto& param : params) {
-                    param.grad().div_(dist_size);
-                }
+            if (process_group) {
+                fastrl::average_gradients(params, process_group.get());
             }
 
             if (opt.clip_grad_norm_enabled) {
                 torch::nn::utils::clip_grad_norm_(params, opt.clip_grad_norm);
             }
+
             optimizer->step();
         }
         float action_kl_loss_this_iter = get_mean(action_kl_loss);
