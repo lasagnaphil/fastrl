@@ -3,6 +3,12 @@ project(fastrl)
 
 set(CMAKE_CXX_STANDARD 17)
 
+option(FASTRL_MPI "Use MPI for Torch distributed backend" OFF)
+option(FASTRL_GLOO "Use GLOO for Torch distributed backend" OFF)
+option(FASTRL_NCCL "Use NCCL for Torch distributed backend" OFF)
+option(FASTRL_BUILD_TESTS "Build tests for RL" OFF)
+option(FASTRL_PYTHON "Build python library" OFF)
+
 find_package(Torch REQUIRED)
 find_package(MPI REQUIRED)
 if (FASTRL_PYTHON)
@@ -44,7 +50,9 @@ set(FASTRL_LIBS tensorboard_logger ${FASTRL_LIBS})
 
 target_link_libraries(fastrl PUBLIC ${FASTRL_LIBS})
 
-add_subdirectory(test)
+if (FASTRL_BUILD_TESTS)
+    add_subdirectory(test)
+endif()
 
 if (FASTRL_PYTHON)
     add_subdirectory(python)
