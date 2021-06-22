@@ -160,6 +160,7 @@ public:
     float get_average_episode_length();
 
     static RolloutBuffer merge(const RolloutBuffer* rollout_buffers, int rollout_buffer_count);
+    static void gather(c10d::ProcessGroup* pg, const RolloutBuffer& send_buf, RolloutBuffer* recv_buf);
     void normalize_observations(RunningMeanStd& obs_mstd);
     void normalize_rewards(RunningMeanStd& rew_mstd);
 
@@ -206,7 +207,7 @@ class PPO {
 public:
     PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger);
     PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
-        std::shared_ptr<c10d::ProcessGroup> process_group);
+        c10d::ProcessGroup* process_group);
 
     void train(const RolloutBufferBatch* batches, int num_batches);
 
@@ -220,7 +221,7 @@ public:
     int64_t num_timesteps = 0;
     float cur_kl_coeff;
 
-    std::shared_ptr<c10d::ProcessGroup> process_group;
+    c10d::ProcessGroup* process_group;
     DistributedBackend dist_backend = DistributedBackend::None;
     int dist_rank, dist_size;
 

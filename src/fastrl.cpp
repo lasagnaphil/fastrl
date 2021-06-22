@@ -477,6 +477,43 @@ RolloutBuffer RolloutBuffer::merge(const RolloutBuffer* rbs, int num_rbs) {
     return res;
 }
 
+void RolloutBuffer::gather(c10d::ProcessGroup* pg, const RolloutBuffer& send_buf, RolloutBuffer* recv_buf) {
+    std::vector<torch::Tensor> send_tensors = {
+            send_buf.observations_data,
+            send_buf.actions_data,
+            send_buf.rewards_data,
+            send_buf.advantages_data,
+            send_buf.returns_data,
+            send_buf.dones_data,
+            send_buf.values_data,
+            send_buf.log_probs_data,
+    };
+    int group_size = pg->getSize();
+    std::vector<std::vector<torch::Tensor>> recv_tensors;
+    if (recv_buf != nullptr) {
+        recv_tensors.resize(group_size);
+    }
+    pg->gather(recv_tensors, send_tensors);
+    if (recv_buf != nullptr) {
+        std::vector<torch::Tensor> tensors(group_size);
+
+#define COPY_TENSORS_TO_RECV_BUF(IDX, TENSOR) \
+        for (int r = 0; r < group_size; r++) { \
+            tensors[r] = recv_tensors[r][(IDX)]; \
+        } \
+        (TENSOR) = torch::cat(tensors, 0);
+
+        COPY_TENSORS_TO_RECV_BUF(0, recv_buf->observations_data)
+        COPY_TENSORS_TO_RECV_BUF(1, recv_buf->actions_data)
+        COPY_TENSORS_TO_RECV_BUF(2, recv_buf->rewards_data)
+        COPY_TENSORS_TO_RECV_BUF(3, recv_buf->advantages_data)
+        COPY_TENSORS_TO_RECV_BUF(4, recv_buf->returns_data)
+        COPY_TENSORS_TO_RECV_BUF(5, recv_buf->dones_data)
+        COPY_TENSORS_TO_RECV_BUF(6, recv_buf->values_data)
+        COPY_TENSORS_TO_RECV_BUF(7, recv_buf->log_probs_data)
+    }
+}
+
 void RolloutBuffer::normalize_observations(RunningMeanStd& obs_mstd) {
     auto obs_stack = observations_data.view({opt.buffer_size * opt.num_envs, -1});
     obs_mstd.update(obs_stack);
@@ -500,11 +537,11 @@ PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<Ten
 }
 
 PPO::PPO(PPOOptions options, std::shared_ptr<Policy> policy, std::shared_ptr<TensorBoardLogger> logger,
-         std::shared_ptr<c10d::ProcessGroup> process_group)
+         c10d::ProcessGroup* process_group)
          : PPO(options, std::move(policy), std::move(logger)) {
 
 #if defined(FASTRL_MPI)
-    if (dynamic_cast<c10d::ProcessGroupMPI*>(process_group.get())) {
+    if (dynamic_cast<c10d::ProcessGroupMPI*>(process_group)) {
         dist_backend = DistributedBackend::MPI;
     }
 #endif
@@ -627,7 +664,7 @@ void PPO::train(const RolloutBufferBatch* batches, int num_batches) {
 
             auto params = policy->parameters();
             if (process_group) {
-                fastrl::average_gradients(params, process_group.get());
+                fastrl::average_gradients(params, process_group);
             }
 
             if (opt.clip_grad_norm_enabled) {

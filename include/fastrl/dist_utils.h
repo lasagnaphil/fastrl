@@ -20,7 +20,7 @@
 namespace fastrl {
 
 inline void average_gradients(std::vector<torch::Tensor>& params, c10d::ProcessGroup* pg) {
-    std::vector<std::shared_ptr<c10d::ProcessGroup::Work>> works;
+    std::vector<c10::intrusive_ptr<c10d::ProcessGroup::Work>> works;
     for (auto& param : params) {
         std::vector<torch::Tensor> tmp = {param.grad().data()};
         works.push_back(std::move(pg->allreduce(tmp)));
