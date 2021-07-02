@@ -221,7 +221,7 @@ public:
     int64_t num_timesteps = 0;
     float cur_kl_coeff;
 
-    c10d::ProcessGroup* process_group;
+    c10d::ProcessGroup* process_group = nullptr;
     DistributedBackend dist_backend = DistributedBackend::None;
     int dist_rank, dist_size;
 
